@@ -398,6 +398,7 @@ def test_xtract_helper_script_exists() -> None:
     text = path.read_text(encoding="utf-8")
     assert "rave-imaging" in text
     assert "derivative_root" in text
+    assert "RECON_XTRACT_TOOL_VERBOSE" in text
 
 
 def test_arg_parser_accepts_xtract_flags() -> None:
@@ -409,9 +410,47 @@ def test_arg_parser_accepts_xtract_flags() -> None:
         "--subject-root", "subject",
         "--run-xtract",
         "--xtract-assets-root", "assets",
+        "--suppress-xtract-tool-output",
     ])
     assert args.run_xtract is True
     assert str(args.xtract_assets_root) == "assets"
+    assert args.suppress_xtract_tool_output is True
+
+
+def test_arg_parser_accepts_suppress_output_alias() -> None:
+    parser = formatter.build_arg_parser()
+    args = parser.parse_args([
+        "build",
+        "--input-csv", "in.csv",
+        "--montage", "montage.xlsx",
+        "--subject-root", "subject",
+        "--suppress-output",
+    ])
+    assert args.suppress_xtract_tool_output is True
+
+
+def test_run_xtract_helper_sets_tool_verbosity_env() -> None:
+    calls: list[dict[str, object]] = []
+    original_run = formatter.subprocess.run
+
+    def fake_run(command: list[str], check: bool, env: dict[str, str]) -> None:
+        calls.append({"command": command, "check": check, "env": env})
+
+    formatter.subprocess.run = fake_run
+    try:
+        formatter.run_xtract_helper(
+            Path("subject"),
+            Path("assets"),
+            logging.getLogger("test"),
+            suppress_xtract_tool_output=True,
+        )
+    finally:
+        formatter.subprocess.run = original_run
+
+    assert calls
+    assert calls[0]["command"][0] == "bash"
+    assert calls[0]["check"] is True
+    assert calls[0]["env"]["RECON_XTRACT_TOOL_VERBOSE"] == "0"
 
 
 def write_csv(path: Path, rows: list[dict[str, str]]) -> None:

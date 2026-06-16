@@ -10,6 +10,17 @@ log() {
   printf '[%s] %s\n' "$(timestamp)" "$*"
 }
 
+tool_verbose_enabled() {
+  case "${RECON_XTRACT_TOOL_VERBOSE:-1}" in
+    0|false|FALSE|no|NO)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
 run_step() {
   local name="$1"
   shift
@@ -21,6 +32,10 @@ run_step() {
   local end_time
   end_time="$(date +%s)"
   log "DONE  ${name} ($((end_time - start_time))s)"
+}
+
+file_ready() {
+  [ -f "$1" ] && [ -s "$1" ]
 }
 
 bootstrap_neuro_env() {
@@ -113,37 +128,82 @@ echo "Running xtract warp for subject ${subject_id}"
 echo "Subject root: $subject_root"
 echo "Atlas assets: $atlas_assets_root"
 echo "Using T1 image: $t1_image"
+if tool_verbose_enabled; then
+  log "Child command verbosity: enabled"
+else
+  log "Child command verbosity: suppressed; Python/shell step logging remains enabled"
+fi
+
+bet_args=(bet "$t1_image" "$brain_t1" -f 0.45)
+if tool_verbose_enabled; then
+  bet_args+=(-v)
+fi
 log "Step 1/4: skull-strip subject T1 with BET"
-run_step "bet" bet "$t1_image" "$brain_t1" -f 0.45
+if file_ready "$brain_t1"; then
+  log "SKIP  bet (existing output: $brain_t1)"
+else
+  run_step "bet" "${bet_args[@]}"
+fi
 
-log "Step 2/4: affine registration of MNI brain to subject brain with FLIRT"
-run_step "flirt" \
-  flirt \
-  -in "${atlas_assets_root}/MNI152_T1_1mm_brain.nii.gz" \
-  -ref "$brain_t1" \
-  -omat "$affine_mat" \
+flirt_args=(
+  flirt
+  -in "${atlas_assets_root}/MNI152_T1_1mm_brain.nii.gz"
+  -ref "$brain_t1"
+  -omat "$affine_mat"
   -out "$warped_mni"
+)
+if tool_verbose_enabled; then
+  flirt_args+=(-v)
+fi
+log "Step 2/4: affine registration of MNI brain to subject brain with FLIRT"
+if file_ready "$affine_mat" && file_ready "$warped_mni"; then
+  log "SKIP  flirt (existing outputs: $affine_mat, $warped_mni)"
+else
+  run_step "flirt" "${flirt_args[@]}"
+fi
 
-log "Step 3/4: nonlinear warp with FNIRT; this is the slow step and can take several minutes"
-run_step "fnirt" \
-  fnirt \
-  --in="${atlas_assets_root}/MNI152_T1_1mm_brain.nii.gz" \
-  --ref="$brain_t1" \
-  --aff="$affine_mat" \
+fnirt_args=(
+  fnirt
+  --in="${atlas_assets_root}/MNI152_T1_1mm_brain.nii.gz"
+  --ref="$brain_t1"
+  --aff="$affine_mat"
   --cout="$warped_field"
+)
+if tool_verbose_enabled; then
+  fnirt_args+=(--verbose)
+fi
+log "Step 3/4: nonlinear warp with FNIRT; this is the slow step and can take several minutes"
+if file_ready "$warped_field"; then
+  log "SKIP  fnirt (existing output: $warped_field)"
+else
+  run_step "fnirt" "${fnirt_args[@]}"
+fi
 
-log "Step 4/4: warp xtract labels into subject space with APPLYWARP"
-run_step "applywarp" \
-  applywarp \
-  -i "$xtract_input" \
-  -o "$xtract_output_nii" \
-  -r "$brain_t1" \
-  --warp="$warped_field" \
+applywarp_args=(
+  applywarp
+  -i "$xtract_input"
+  -o "$xtract_output_nii"
+  -r "$brain_t1"
+  --warp="$warped_field"
   --interp=nn
+)
+if tool_verbose_enabled; then
+  applywarp_args+=(--verbose)
+fi
+log "Step 4/4: warp xtract labels into subject space with APPLYWARP"
+if file_ready "$xtract_output_nii"; then
+  log "SKIP  applywarp (existing output: $xtract_output_nii)"
+else
+  run_step "applywarp" "${applywarp_args[@]}"
+fi
 
 if command -v mri_convert >/dev/null 2>&1; then
   log "Optional step: convert warped xtract labels to MGZ"
-  run_step "mri_convert" mri_convert "$xtract_output_nii" "$xtract_output_mgz"
+  if file_ready "$xtract_output_mgz"; then
+    log "SKIP  mri_convert (existing output: $xtract_output_mgz)"
+  else
+    run_step "mri_convert" mri_convert "$xtract_output_nii" "$xtract_output_mgz"
+  fi
 else
   log "mri_convert not found; skipping MGZ conversion"
 fi

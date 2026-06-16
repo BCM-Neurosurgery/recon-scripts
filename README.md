@@ -40,6 +40,7 @@ recon-electrodes build \
 - NSx parsing is best-effort. If `neo` is unavailable or a file cannot be parsed, the CSV is still written and NSx columns are left blank.
 - Synthetic micro rows receive unique `ElectrodeID` values; montage and NS5 ranges are stored in their own columns.
 - Macro atlas fields come from RAVE first; synthetic micro atlas fields are sampled from subject imaging products when available and otherwise fall back to the owning macro row.
+- `--run-xtract` uses verbose BET/FLIRT/FNIRT/APPLYWARP output by default. If you want only the higher-level Python and shell step logs, add `--suppress-xtract-tool-output` or its alias `--suppress-output`.
 
 ### Optional Xtract Helper
 

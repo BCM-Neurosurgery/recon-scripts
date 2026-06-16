@@ -1139,13 +1139,24 @@ def build_ns5_bundle_map(ns5_channels: list[NSxChannel]) -> dict[str, list[NSxCh
     return representative_map
 
 
-def run_xtract_helper(subject_root: Path, xtract_assets_root: Path, logger: logging.Logger) -> None:
+def run_xtract_helper(
+    subject_root: Path,
+    xtract_assets_root: Path,
+    logger: logging.Logger,
+    suppress_xtract_tool_output: bool = False,
+) -> None:
     helper = Path(__file__).resolve().parents[2] / "scripts" / "run_xtract_rave_subject.sh"
     if not helper.exists():
         raise ElectrodeBuildError(f"Xtract helper script not found: {helper}")
     command = ["bash", str(helper), str(subject_root), str(xtract_assets_root)]
-    logger.info("Running xtract helper: %s", " ".join(command))
-    subprocess.run(command, check=True)
+    env = os.environ.copy()
+    env["RECON_XTRACT_TOOL_VERBOSE"] = "0" if suppress_xtract_tool_output else "1"
+    logger.info(
+        "Running xtract helper: %s (tool output %s)",
+        " ".join(command),
+        "suppressed" if suppress_xtract_tool_output else "verbose",
+    )
+    subprocess.run(command, check=True, env=env)
 
 
 def assign_nsx_metadata(
@@ -1228,6 +1239,7 @@ def build_electrodes_v2026(
     strict: bool = False,
     run_xtract: bool = False,
     xtract_assets_root: Path | None = None,
+    suppress_xtract_tool_output: bool = False,
     logger: logging.Logger | None = None,
 ) -> Path:
     logger = logger or LOGGER
@@ -1237,7 +1249,12 @@ def build_electrodes_v2026(
     if run_xtract and subject_paths.xtract_volume is None:
         if xtract_assets_root is None:
             raise ElectrodeBuildError("--run-xtract requires --xtract-assets-root")
-        run_xtract_helper(subject_root, xtract_assets_root, logger)
+        run_xtract_helper(
+            subject_root,
+            xtract_assets_root,
+            logger,
+            suppress_xtract_tool_output=suppress_xtract_tool_output,
+        )
         subject_paths = resolve_subject_paths(subject_root, subject_code)
     macros, bundles = load_montage(montage)
     rave_index = build_rave_index(rave_rows)
@@ -1297,6 +1314,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     build.add_argument("--strict", action="store_true", help="Fail on recoverable warnings such as missing micro owners")
     build.add_argument("--run-xtract", action="store_true", help="Run the repo xtract helper if the subject-space xtract volume is missing")
     build.add_argument("--xtract-assets-root", type=Path, help="Root containing MNI152 and xtract atlas assets for --run-xtract")
+    build.add_argument(
+        "--suppress-xtract-tool-output",
+        "--suppress-output",
+        action="store_true",
+        dest="suppress_xtract_tool_output",
+        help="Keep Python xtract step logs, but run BET/FLIRT/FNIRT/APPLYWARP without their verbose terminal output",
+    )
     build.add_argument("--verbose", action="store_true", help="Enable info-level logging")
     return parser
 
@@ -1320,6 +1344,7 @@ def main(argv: list[str] | None = None) -> int:
             strict=args.strict,
             run_xtract=args.run_xtract,
             xtract_assets_root=args.xtract_assets_root,
+            suppress_xtract_tool_output=args.suppress_xtract_tool_output,
             logger=LOGGER,
         )
         return 0
