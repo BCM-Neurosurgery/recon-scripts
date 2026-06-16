@@ -13,7 +13,7 @@ RAVE `electrodes.csv` into a lab-ready `{patient}-electrodes_v2026.csv`.
 - Synthesizes one bundled micro row per 8-contact micro set from montage `Sheet2`
 - Preserves the first 27 v2025 output columns in the expected order
 - Appends lab bookkeeping columns:
-  `MicroContactRange`, `MontageElectrodeIDRange`, `NSxSource`, `NSxIndex`, `NSxElectrodeID`
+  `MontageElectrodeID`, `NSxSource`, `NSxIndex`, `NSxElectrodeID`
 - Uses RAVE-native subject roots under `raw_dir/<subject>/rave-imaging/...` first
 - Maps macro atlas fields directly from existing RAVE `FSLabel_*` columns
 - Falls back to subject imaging products for transform-derived coordinates and optional atlas sampling

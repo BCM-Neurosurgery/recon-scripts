@@ -72,7 +72,7 @@ def test_load_montage_groups_micro_bundles(tmp_path: Path) -> None:
     macros, bundles = load_montage(montage)
     assert len(macros) == 2
     assert len(bundles) == 1
-    assert bundles[0].contact_range == "mLT2aA01-mLT2aA08"
+    assert bundles[0].contact_labels == [f"mLT2aA0{i}" for i in range(1, 9)]
 
 
 def test_output_row_from_macro_maps_rave_atlas_fields() -> None:
@@ -102,6 +102,7 @@ def test_output_row_from_macro_maps_rave_atlas_fields() -> None:
     )
     assert row["ElectrodeID"] == "33"
     assert row["Label"] == "LT2aA01"
+    assert row["MontageElectrodeID"] == "33"
     assert row["ROI_D2009_3mm"] == "Left-Hippocampus"
     assert row["ROI_DK2005_3mm"] == "Left-Cerebral-White-Matter"
     assert row["Area_fs_vox"] == "ctx-lh-insula"
@@ -169,8 +170,7 @@ def test_synthesize_micro_row_projects_three_mm_deeper() -> None:
     assert row["ElectrodeID"] == "257"
     assert row["Coord_z"] == "-3"
     assert row["MNI305_z"] == "-3.15"
-    assert row["MicroContactRange"] == "mLT2aA01-mLT2aA08"
-    assert row["MontageElectrodeIDRange"] == "1-8"
+    assert row["MontageElectrodeID"] == "1-8"
 
 
 def test_sample_label_volume_returns_majority_label() -> None:
@@ -364,8 +364,8 @@ def test_build_electrodes_v2026_rave_layout_integration(tmp_path: Path) -> None:
     assert rows[2]["Label"] == "mLT2aA01"
     assert rows[2]["Type"] == "microwires"
     assert rows[2]["ElectrodeID"] == "35"
-    assert rows[2]["MicroContactRange"] == "mLT2aA01-mLT2aA08"
-    assert rows[2]["MontageElectrodeIDRange"] == "89-96"
+    assert rows[2]["MontageElectrodeID"] == "89-96"
+    assert rows[0]["MontageElectrodeID"] == "33"
     assert rows[2]["NSxSource"] == "ns5"
     assert rows[2]["NSxIndex"] == "1-8"
     assert rows[2]["NSxElectrodeID"] == "89-96"

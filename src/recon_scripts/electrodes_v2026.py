@@ -47,8 +47,7 @@ OUTPUT_COLUMNS = [
     "MNI152_x",
     "MNI152_y",
     "MNI152_z",
-    "MicroContactRange",
-    "MontageElectrodeIDRange",
+    "MontageElectrodeID",
     "NSxSource",
     "NSxIndex",
     "NSxElectrodeID",
@@ -147,11 +146,6 @@ class MicroBundle:
     def owner_label(self) -> str:
         label = self.representative_label
         return label[1:] if label.startswith(("m", "M")) else label
-
-    @property
-    def contact_range(self) -> str:
-        return f"{self.contact_labels[0]}-{self.contact_labels[-1]}"
-
 
 @dataclass(frozen=True)
 class NSxChannel:
@@ -550,9 +544,10 @@ def output_row_from_macro(montage_row: MontageRow, rave_row: dict[str, str]) -> 
     output = create_base_output_row()
     output["ElectrodeID"] = montage_row.electrode_id
     output["Label"] = montage_row.channel_label
+    output["MontageElectrodeID"] = montage_row.electrode_id
 
     for column in OUTPUT_COLUMNS:
-        if column in {"ElectrodeID", "Label", "MicroContactRange", "NSxSource", "NSxIndex", "NSxElectrodeID"}:
+        if column in {"ElectrodeID", "Label", "MontageElectrodeID", "NSxSource", "NSxIndex", "NSxElectrodeID"}:
             continue
         if column in rave_row and str(rave_row[column]).strip():
             output[column] = str(rave_row[column]).strip()
@@ -646,8 +641,7 @@ def synthesize_micro_row(
     output = create_base_output_row()
     output["ElectrodeID"] = str(synthetic_electrode_id)
     output["Label"] = bundle.representative_label
-    output["MicroContactRange"] = bundle.contact_range
-    output["MontageElectrodeIDRange"] = range_or_scalar(bundle.electrode_ids)
+    output["MontageElectrodeID"] = range_or_scalar(bundle.electrode_ids)
     output["Type"] = "microwires"
     output["Hemisphere"] = derive_hemisphere(bundle.representative_label)
     output["Manufacturer"] = compute_manufacturer(output["Type"])
