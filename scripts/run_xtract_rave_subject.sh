@@ -2,6 +2,27 @@
 
 set -euo pipefail
 
+timestamp() {
+  date "+%Y-%m-%d %H:%M:%S"
+}
+
+log() {
+  printf '[%s] %s\n' "$(timestamp)" "$*"
+}
+
+run_step() {
+  local name="$1"
+  shift
+  local start_time
+  start_time="$(date +%s)"
+  log "START ${name}"
+  log "CMD   $*"
+  "$@"
+  local end_time
+  end_time="$(date +%s)"
+  log "DONE  ${name} ($((end_time - start_time))s)"
+}
+
 bootstrap_neuro_env() {
   if command -v bet >/dev/null 2>&1 && command -v flirt >/dev/null 2>&1 && command -v fnirt >/dev/null 2>&1 && command -v applywarp >/dev/null 2>&1; then
     return
@@ -92,22 +113,28 @@ echo "Running xtract warp for subject ${subject_id}"
 echo "Subject root: $subject_root"
 echo "Atlas assets: $atlas_assets_root"
 echo "Using T1 image: $t1_image"
+log "Step 1/4: skull-strip subject T1 with BET"
+run_step "bet" bet "$t1_image" "$brain_t1" -f 0.45
 
-bet "$t1_image" "$brain_t1" -f 0.45
-
-flirt \
+log "Step 2/4: affine registration of MNI brain to subject brain with FLIRT"
+run_step "flirt" \
+  flirt \
   -in "${atlas_assets_root}/MNI152_T1_1mm_brain.nii.gz" \
   -ref "$brain_t1" \
   -omat "$affine_mat" \
   -out "$warped_mni"
 
-fnirt \
+log "Step 3/4: nonlinear warp with FNIRT; this is the slow step and can take several minutes"
+run_step "fnirt" \
+  fnirt \
   --in="${atlas_assets_root}/MNI152_T1_1mm_brain.nii.gz" \
   --ref="$brain_t1" \
   --aff="$affine_mat" \
   --cout="$warped_field"
 
-applywarp \
+log "Step 4/4: warp xtract labels into subject space with APPLYWARP"
+run_step "applywarp" \
+  applywarp \
   -i "$xtract_input" \
   -o "$xtract_output_nii" \
   -r "$brain_t1" \
@@ -115,12 +142,13 @@ applywarp \
   --interp=nn
 
 if command -v mri_convert >/dev/null 2>&1; then
-  mri_convert "$xtract_output_nii" "$xtract_output_mgz"
+  log "Optional step: convert warped xtract labels to MGZ"
+  run_step "mri_convert" mri_convert "$xtract_output_nii" "$xtract_output_mgz"
 else
-  echo "mri_convert not found; skipping MGZ conversion"
+  log "mri_convert not found; skipping MGZ conversion"
 fi
 
-echo "Wrote:"
+log "Wrote:"
 echo "  $xtract_output_nii"
 if [ -f "$xtract_output_mgz" ]; then
   echo "  $xtract_output_mgz"
