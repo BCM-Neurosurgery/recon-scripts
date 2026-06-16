@@ -1,0 +1,2 @@
+[console_scripts]
+recon-electrodes = recon_scripts.electrodes_v2026:main

@@ -4,11 +4,8 @@ import argparse
 import csv
 import logging
 import math
-import os
 import re
-import subprocess
 import zipfile
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -48,7 +45,6 @@ OUTPUT_COLUMNS = [
     "MNI152_y",
     "MNI152_z",
     "MicroContactRange",
-    "MontageElectrodeIDRange",
     "NSxSource",
     "NSxIndex",
     "NSxElectrodeID",
@@ -56,6 +52,7 @@ OUTPUT_COLUMNS = [
 
 ROW_ALIAS_MAP = {
     "Electrode": "ElectrodeID",
+    "Hemisphere": "Hemisphere",
     "LocationType": "Type",
     "T1R": "Scanner_R",
     "T1A": "Scanner_A",
@@ -63,70 +60,18 @@ ROW_ALIAS_MAP = {
     "MRVoxel_I": "x_vox",
     "MRVoxel_J": "y_vox",
     "MRVoxel_K": "z_vox",
-}
-
-RAVE_OUTPUT_MAP = {
-    "ROI_D2009_3mm": "FSLabel_aparc_a2009s_aseg",
-    "ROI_DK2005_3mm": "FSLabel_aparc_aseg",
-    "Area_fs_vox": "FSLabel_aparc_DKTatlas_aseg",
     "MNI152_x": "MNI152_x",
     "MNI152_y": "MNI152_y",
     "MNI152_z": "MNI152_z",
-    "Scanner_R": "T1R",
-    "Scanner_A": "T1A",
-    "Scanner_S": "T1S",
-    "x_vox": "MRVoxel_I",
-    "y_vox": "MRVoxel_J",
-    "z_vox": "MRVoxel_K",
 }
 
-LEGACY_SIDE_CAR_FILES = {
+SIDE_CAR_FILES = {
     "ROI_D2009_3mm": "{subject}_D2009Vol_ElectrodeLabelsRadius_3mm.xlsx",
     "Matter_3mm": "{subject}_D2009Vol_ElectrodeLabelsRadius_3mm.xlsx",
     "ROI_DK2005_3mm": "{subject}_DK2005Vol_ElectrodeLabelsRadius_3mm.xlsx",
     "ROI_XTRACT_3mm": "{subject}_xtract_ElectrodeLabelsRadius_3mm.xlsx",
     "Area_fs_vox": "{subject}_DK_AtlasLabels.csv",
 }
-
-FREESURFER_LUT_CANDIDATES = (
-    "FreeSurferColorLUT.txt",
-    "FreeSurferColorLUTnoFormat.txt",
-)
-
-XTRACT_LUT_CANDIDATES = (
-    "xtractColorLUTnoFormat_SH.txt",
-    "xtractColorLUTnoFormat.txt",
-    "xtract_LUT_noformat.txt",
-)
-
-WHITE_KEYWORDS = (
-    "white",
-    "wm",
-    "uncinate",
-    "cingulum",
-    "fasciculus",
-    "tract",
-    "radiation",
-    "capsule",
-    "corona-radiata",
-)
-
-SUBCORTICAL_KEYWORDS = (
-    "hippocampus",
-    "amygdala",
-    "thalamus",
-    "ventraldc",
-    "putamen",
-    "caudate",
-    "pallidum",
-    "accumbens",
-    "brain-stem",
-    "hypothalam",
-    "subthalamic",
-    "substantia",
-    "lat-vent",
-    "ventricle",
-)
 
 
 @dataclass(frozen=True)
@@ -161,28 +106,6 @@ class NSxChannel:
     label: str
 
 
-@dataclass(frozen=True)
-class SubjectPaths:
-    subject_root: Path
-    rave_root: Path | None
-    localization_csv: Path | None
-    transform_norig: Path | None
-    transform_torig: Path | None
-    fs_aparc_a2009s: Path | None
-    fs_aparc_dk: Path | None
-    fs_aparc_dkt: Path | None
-    xtract_volume: Path | None
-    freesurfer_lut: Path | None
-    xtract_lut: Path | None
-
-
-@dataclass(frozen=True)
-class LabelVolume:
-    data: np.ndarray
-    affine: np.ndarray
-    labels: dict[int, str]
-
-
 class ElectrodeBuildError(RuntimeError):
     """Raised when the electrodes file cannot be built safely."""
 
@@ -201,16 +124,16 @@ def canonicalize_label(label: str) -> str:
 
 
 def split_label(label: str) -> tuple[str, int | None]:
-    match = re.match(r"^(.*?)(\d+)$", str(label).strip())
+    match = re.match(r"^(.*?)(\d+)$", label.strip())
     if not match:
-        return str(label).strip(), None
+        return label.strip(), None
     stem, suffix = match.groups()
     return stem, int(suffix)
 
 
-def read_csv_rows(path: Path, delimiter: str = ",") -> list[dict[str, str]]:
+def read_csv_rows(path: Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8-sig") as handle:
-        return list(csv.DictReader(handle, delimiter=delimiter))
+        return list(csv.DictReader(handle))
 
 
 def read_xlsx_sheet(path: Path, sheet_name: str) -> list[dict[str, str]]:
@@ -237,7 +160,7 @@ def read_xlsx_sheet(path: Path, sheet_name: str) -> list[dict[str, str]]:
                 target = "xl/" + rel_map[rel_id]
                 break
         if target is None:
-            return []
+            raise ElectrodeBuildError(f"Sheet {sheet_name!r} not found in {path}")
 
         sheet_xml = ET.fromstring(archive.read(target))
         rows: list[list[str]] = []
@@ -290,110 +213,6 @@ def normalize_rave_row(row: dict[str, str]) -> dict[str, str]:
         normalized["Type"] = normalized.get("LocationType", "")
     normalized.setdefault("Label", "")
     return normalized
-
-
-def resolve_subject_paths(subject_root: Path, subject_code: str) -> SubjectPaths:
-    rave_root = subject_root / "rave-imaging"
-    localization_csv = None
-    transform_norig = None
-    transform_torig = None
-    fs_aparc_a2009s = None
-    fs_aparc_dk = None
-    fs_aparc_dkt = None
-    xtract_volume = None
-    freesurfer_lut = None
-    xtract_lut = None
-
-    if rave_root.exists():
-        localization_candidate = rave_root / "localization" / "electrodes.csv"
-        localization_csv = localization_candidate if localization_candidate.exists() else None
-        transform_norig = find_first_existing(
-            rave_root / "derivative" / "transform-Norig.tsv",
-            rave_root / "coregistration" / "transform-Norig.tsv",
-        )
-        transform_torig = find_first_existing(
-            rave_root / "derivative" / "transform-Torig.tsv",
-            rave_root / "coregistration" / "transform-Torig.tsv",
-        )
-        fs_aparc_a2009s = find_first_existing(
-            rave_root / "fs" / "mri" / "aparc.a2009s+aseg.mgz",
-            rave_root / "fs" / "mri" / "aparc.a2009s+aseg.nii.gz",
-        )
-        fs_aparc_dk = find_first_existing(
-            rave_root / "fs" / "mri" / "aparc+aseg.mgz",
-            rave_root / "fs" / "mri" / "aparc+aseg.nii.gz",
-        )
-        fs_aparc_dkt = find_first_existing(
-            rave_root / "fs" / "mri" / "aparc.DKTatlas+aseg.mgz",
-            rave_root / "fs" / "mri" / "aparc.DKTatlas+aseg.nii.gz",
-        )
-        xtract_volume = find_first_existing(
-            rave_root / "derivative" / f"xtract_label_in_{subject_code}.mgz",
-            rave_root / "derivative" / f"xtract_label_in_{subject_code}.nii.gz",
-            rave_root / "fs" / "mri" / f"xtract_label_in_{subject_code}.mgz",
-            rave_root / "fs" / "mri" / f"xtract_label_in_{subject_code}.nii.gz",
-        )
-
-    freesurfer_lut = discover_lut(
-        subject_root,
-        FREESURFER_LUT_CANDIDATES,
-        env_var="FREESURFER_HOME",
-    )
-    xtract_lut = discover_lut(
-        subject_root,
-        XTRACT_LUT_CANDIDATES,
-        env_var="XTRACT_LUT_FILE",
-    )
-
-    return SubjectPaths(
-        subject_root=subject_root,
-        rave_root=rave_root if rave_root.exists() else None,
-        localization_csv=localization_csv,
-        transform_norig=transform_norig,
-        transform_torig=transform_torig,
-        fs_aparc_a2009s=fs_aparc_a2009s,
-        fs_aparc_dk=fs_aparc_dk,
-        fs_aparc_dkt=fs_aparc_dkt,
-        xtract_volume=xtract_volume,
-        freesurfer_lut=freesurfer_lut,
-        xtract_lut=xtract_lut,
-    )
-
-
-def discover_lut(subject_root: Path, candidate_names: tuple[str, ...], env_var: str | None = None) -> Path | None:
-    if env_var:
-        env_value = os.environ.get(env_var)
-        if env_value:
-            env_path = Path(env_value)
-            if env_path.is_file():
-                return env_path
-            if env_path.is_dir():
-                for candidate_name in candidate_names:
-                    candidate = env_path / candidate_name
-                    if candidate.exists():
-                        return candidate
-
-    candidate_dirs = [
-        subject_root,
-        subject_root / "rave-imaging",
-        subject_root / "rave-imaging" / "derivative",
-        Path("/Volumes/projectworlds/EMU-18112/ElectrodeLabelsROIs"),
-        Path("/usr/local/freesurfer"),
-        Path("/Applications/freesurfer"),
-    ]
-    for directory in candidate_dirs:
-        for candidate_name in candidate_names:
-            candidate = directory / candidate_name
-            if candidate.exists():
-                return candidate
-    return None
-
-
-def find_first_existing(*paths: Path) -> Path | None:
-    for path in paths:
-        if path.exists():
-            return path
-    return None
 
 
 def load_montage(path: Path) -> tuple[list[MontageRow], list[MicroBundle]]:
@@ -472,19 +291,23 @@ def validate_macros(macros: list[MontageRow], rave_index: dict[str, dict[str, st
 def create_base_output_row() -> dict[str, str]:
     row = {column: "" for column in OUTPUT_COLUMNS}
     row["Bolt"] = "0"
+    row["MicroContactRange"] = ""
+    row["NSxSource"] = ""
+    row["NSxIndex"] = ""
+    row["NSxElectrodeID"] = ""
     return row
 
 
 def derive_hemisphere(label: str) -> str:
     if not label:
         return "NA"
-    if label.startswith(("mL", "Ml", "ml")):
-        return "Left"
-    if label.startswith(("mR", "Mr", "mr")):
-        return "Right"
     if label.startswith(("L", "l")):
         return "Left"
     if label.startswith(("R", "r")):
+        return "Right"
+    if label.startswith(("mL", "Ml", "ml")):
+        return "Left"
+    if label.startswith(("mR", "Mr", "mr")):
         return "Right"
     return "NA"
 
@@ -515,37 +338,6 @@ def compute_manufacturer(row_type: str) -> str:
     return "NA"
 
 
-def classify_matter(label: str) -> str:
-    value = (label or "").strip()
-    folded = value.casefold()
-    if not value:
-        return ""
-    if folded in {"na"}:
-        return "NA"
-    if "out" in folded:
-        return "Out"
-    if "unknown" in folded:
-        return "Unknown"
-    if any(keyword in folded for keyword in WHITE_KEYWORDS):
-        return "White"
-    if any(keyword in folded for keyword in SUBCORTICAL_KEYWORDS):
-        return "Subcortical"
-    return "Grey"
-
-
-def apply_rave_macro_mappings(output: dict[str, str], rave_row: dict[str, str]) -> None:
-    for source, dest in ROW_ALIAS_MAP.items():
-        if source in rave_row and dest in OUTPUT_COLUMNS and str(rave_row[source]).strip() and not output.get(dest):
-            output[dest] = str(rave_row[source]).strip()
-    for output_column, rave_column in RAVE_OUTPUT_MAP.items():
-        if str(rave_row.get(rave_column, "")).strip() and not output.get(output_column):
-            output[output_column] = str(rave_row[rave_column]).strip()
-    if not output.get("Matter_fs_vox") and output.get("Area_fs_vox"):
-        output["Matter_fs_vox"] = classify_matter(output["Area_fs_vox"])
-    if not output.get("Matter_3mm") and output.get("ROI_D2009_3mm"):
-        output["Matter_3mm"] = classify_matter(output["ROI_D2009_3mm"])
-
-
 def output_row_from_macro(montage_row: MontageRow, rave_row: dict[str, str]) -> dict[str, str]:
     output = create_base_output_row()
     output["ElectrodeID"] = montage_row.electrode_id
@@ -557,12 +349,23 @@ def output_row_from_macro(montage_row: MontageRow, rave_row: dict[str, str]) -> 
         if column in rave_row and str(rave_row[column]).strip():
             output[column] = str(rave_row[column]).strip()
 
-    apply_rave_macro_mappings(output, rave_row)
     output["Type"] = normalize_type(output.get("Type", ""), output["Label"])
     output["Hemisphere"] = output.get("Hemisphere") or derive_hemisphere(output["Label"])
     output["Manufacturer"] = output.get("Manufacturer") or compute_manufacturer(output["Type"])
     output["Bolt"] = output.get("Bolt") or "0"
     return output
+
+
+def values_to_point(rows: list[dict[str, str]], columns: tuple[str, str, str]) -> np.ndarray | None:
+    points: list[list[float]] = []
+    for row in rows:
+        values = [parse_float(row.get(column, "")) for column in columns]
+        if any(value is None for value in values):
+            continue
+        points.append([float(value) for value in values])
+    if len(points) < 2:
+        return None
+    return np.asarray(points, dtype=float)
 
 
 def parse_float(value: str | float | int | None) -> float | None:
@@ -577,18 +380,6 @@ def parse_float(value: str | float | int | None) -> float | None:
         return float(text)
     except ValueError:
         return None
-
-
-def values_to_point(rows: list[dict[str, str]], columns: tuple[str, str, str]) -> np.ndarray | None:
-    points: list[list[float]] = []
-    for row in rows:
-        values = [parse_float(row.get(column, "")) for column in columns]
-        if any(value is None for value in values):
-            continue
-        points.append([float(value) for value in values])
-    if len(points) < 2:
-        return None
-    return np.asarray(points, dtype=float)
 
 
 def get_unit_vector(points: np.ndarray) -> np.ndarray:
@@ -612,52 +403,36 @@ def format_decimal(value: float | None, digits: int = 4) -> str:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-def range_or_scalar(values: list[str]) -> str:
-    compact = [str(value).strip() for value in values if str(value).strip()]
-    if not compact:
-        return ""
-    if len(compact) == 1:
-        return compact[0]
-    return f"{compact[0]}-{compact[-1]}"
-
-
-def next_synthetic_electrode_id(output_rows: list[dict[str, str]]) -> int:
-    numeric_ids = [
-        int(row["ElectrodeID"])
-        for row in output_rows
-        if str(row.get("ElectrodeID", "")).isdigit()
-    ]
-    return (max(numeric_ids) if numeric_ids else 0) + 1
-
-
-def point_from_row(row: dict[str, str], columns: tuple[str, str, str]) -> np.ndarray | None:
-    values = [parse_float(row.get(column, "")) for column in columns]
-    if any(value is None for value in values):
-        return None
-    return np.asarray(values, dtype=float)
-
-
 def synthesize_micro_row(
     bundle: MicroBundle,
     owner_row: dict[str, str],
     shaft_rows: list[dict[str, str]],
-    synthetic_electrode_id: int,
 ) -> dict[str, str]:
     output = create_base_output_row()
-    output["ElectrodeID"] = str(synthetic_electrode_id)
+    output["ElectrodeID"] = range_or_scalar(bundle.electrode_ids)
     output["Label"] = bundle.representative_label
     output["MicroContactRange"] = bundle.contact_range
-    output["MontageElectrodeIDRange"] = range_or_scalar(bundle.electrode_ids)
     output["Type"] = "microwires"
     output["Hemisphere"] = derive_hemisphere(bundle.representative_label)
     output["Manufacturer"] = compute_manufacturer(output["Type"])
     output["Bolt"] = owner_row.get("Bolt", "0")
-    output["__owner_label"] = owner_row["Label"]
+
+    for text_column in [
+        "ROI_D2009_3mm",
+        "Matter_3mm",
+        "ROI_DK2005_3mm",
+        "ROI_XTRACT_3mm",
+        "Area_fs_vox",
+        "Matter_fs_vox",
+    ]:
+        output[text_column] = owner_row.get(text_column, "")
 
     coordinate_sets = {
         ("Coord_x", "Coord_y", "Coord_z"): 3.0,
         ("MNI305_x", "MNI305_y", "MNI305_z"): 3.15,
         ("MNI152_x", "MNI152_y", "MNI152_z"): 3.15,
+        ("Scanner_R", "Scanner_A", "Scanner_S"): 3.0,
+        ("x_vox", "y_vox", "z_vox"): 3.0,
     }
     for columns, distance in coordinate_sets.items():
         owner_point = [parse_float(owner_row.get(column, "")) for column in columns]
@@ -672,6 +447,15 @@ def synthesize_micro_row(
             output[column] = format_decimal(value)
 
     return output
+
+
+def range_or_scalar(values: list[str]) -> str:
+    compact = [str(value).strip() for value in values if str(value).strip()]
+    if not compact:
+        return ""
+    if len(compact) == 1:
+        return compact[0]
+    return f"{compact[0]}-{compact[-1]}"
 
 
 def collect_shaft_rows(output_rows: list[dict[str, str]], owner_label: str) -> list[dict[str, str]]:
@@ -766,211 +550,37 @@ def parse_electrode_names(path: Path) -> list[str]:
     return labels
 
 
-def build_coordinate_sidecar_map(
-    pial_path: Path,
-    pialvox_path: Path,
-    fsaverage_path: Path,
-    names_path: Path,
-) -> dict[str, dict[str, str]]:
-    pial = read_ascii_matrix(pial_path)
-    pialvox = read_ascii_matrix(pialvox_path)
-    fsaverage = read_ascii_matrix(fsaverage_path)
-    names = parse_electrode_names(names_path)
-    count = min(len(names), len(pial), len(pialvox), len(fsaverage))
-    mapping: dict[str, dict[str, str]] = {}
-    for index in range(count):
-        key = canonicalize_label(names[index])
-        mapping[key] = {
-            "Coord_x": format_decimal(pial[index][0]),
-            "Coord_y": format_decimal(pial[index][1]),
-            "Coord_z": format_decimal(pial[index][2]),
-            "x_vox": format_decimal(pialvox[index][0]),
-            "y_vox": format_decimal(pialvox[index][1]),
-            "z_vox": format_decimal(pialvox[index][2]),
-            "MNI305_x": format_decimal(fsaverage[index][0]),
-            "MNI305_y": format_decimal(fsaverage[index][1]),
-            "MNI305_z": format_decimal(fsaverage[index][2]),
-        }
-    return mapping
-
-
-def read_transform_matrix(path: Path | None) -> np.ndarray | None:
-    if path is None or not path.exists():
-        return None
-    return np.loadtxt(path)
-
-
-def tkr_to_scanner_ras(coord: np.ndarray, norig: np.ndarray, torig: np.ndarray) -> np.ndarray:
-    hom = np.append(coord, 1.0)
-    return (norig @ np.linalg.inv(torig) @ hom)[:3]
-
-
-def scanner_ras_to_vox(scanner_ras: np.ndarray, norig: np.ndarray) -> np.ndarray:
-    hom = np.append(scanner_ras, 1.0)
-    return (np.linalg.inv(norig) @ hom)[:3]
-
-
-def ensure_scanner_and_vox_coords(output_rows: list[dict[str, str]], subject_paths: SubjectPaths) -> None:
-    norig = read_transform_matrix(subject_paths.transform_norig)
-    torig = read_transform_matrix(subject_paths.transform_torig)
-    if norig is None or torig is None:
-        return
-    for row in output_rows:
-        coord = point_from_row(row, ("Coord_x", "Coord_y", "Coord_z"))
-        if coord is None:
-            continue
-        needs_scanner = row["Type"] == "microwires" or not point_from_row(row, ("Scanner_R", "Scanner_A", "Scanner_S")) is not None
-        if needs_scanner:
-            scanner = tkr_to_scanner_ras(coord, norig, torig)
-            row["Scanner_R"] = format_decimal(scanner[0])
-            row["Scanner_A"] = format_decimal(scanner[1])
-            row["Scanner_S"] = format_decimal(scanner[2])
-        scanner_ras = point_from_row(row, ("Scanner_R", "Scanner_A", "Scanner_S"))
-        if scanner_ras is None:
-            continue
-        needs_vox = row["Type"] == "microwires" or point_from_row(row, ("x_vox", "y_vox", "z_vox")) is None
-        if needs_vox:
-            vox = scanner_ras_to_vox(scanner_ras, norig)
-            row["x_vox"] = format_decimal(vox[0])
-            row["y_vox"] = format_decimal(vox[1])
-            row["z_vox"] = format_decimal(vox[2])
-
-
-def load_label_lookup(path: Path | None) -> dict[int, str]:
-    if path is None or not path.exists():
-        return {}
-    lookup: dict[int, str] = {}
-    with path.open(encoding="utf-8", errors="ignore") as handle:
-        for line in handle:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            parts = stripped.split()
-            if len(parts) < 2:
-                continue
-            try:
-                code = int(parts[0])
-            except ValueError:
-                continue
-            lookup[code] = parts[1]
-    return lookup
-
-
-def load_label_volume(path: Path | None, lookup: dict[int, str], logger: logging.Logger) -> LabelVolume | None:
-    if path is None or not path.exists() or not lookup:
-        return None
-    try:
-        import nibabel as nib
-    except Exception as exc:  # pragma: no cover - import depends on local env
-        logger.warning("nibabel is unavailable for atlas sampling: %s", exc)
-        return None
-
-    try:
-        image = nib.load(str(path))
-    except Exception as exc:  # pragma: no cover - runtime data dependent
-        logger.warning("Unable to load atlas volume %s: %s", path, exc)
-        return None
-
-    data = np.asarray(image.get_fdata())
-    return LabelVolume(data=data, affine=np.asarray(image.affine), labels=lookup)
-
-
-def sample_label_volume(volume: LabelVolume | None, scanner_ras: np.ndarray | None, radius_mm: float = 3.0) -> str:
-    if volume is None or scanner_ras is None:
-        return ""
-    inv_affine = np.linalg.inv(volume.affine)
-    center_vox = (inv_affine @ np.append(scanner_ras, 1.0))[:3]
-    voxel_sizes = np.linalg.norm(volume.affine[:3, :3], axis=0)
-    voxel_sizes = np.where(voxel_sizes == 0, 1.0, voxel_sizes)
-    radius_vox = np.ceil(radius_mm / voxel_sizes).astype(int)
-    lo = np.maximum(np.floor(center_vox - radius_vox).astype(int), 0)
-    hi = np.minimum(np.ceil(center_vox + radius_vox).astype(int), np.array(volume.data.shape[:3]) - 1)
-
-    samples: list[int] = []
-    for i in range(lo[0], hi[0] + 1):
-        for j in range(lo[1], hi[1] + 1):
-            for k in range(lo[2], hi[2] + 1):
-                world = (volume.affine @ np.array([i, j, k, 1.0]))[:3]
-                if np.linalg.norm(world - scanner_ras) > radius_mm:
-                    continue
-                code = int(round(float(volume.data[i, j, k])))
-                if code != 0:
-                    samples.append(code)
-    if not samples:
-        return ""
-    code, _ = Counter(samples).most_common(1)[0]
-    return volume.labels.get(code, "")
-
-
-def sample_subject_atlas_volumes(output_rows: list[dict[str, str]], subject_paths: SubjectPaths, logger: logging.Logger) -> None:
-    freesurfer_lookup = load_label_lookup(subject_paths.freesurfer_lut)
-    xtract_lookup = load_label_lookup(subject_paths.xtract_lut)
-    d2009_volume = load_label_volume(subject_paths.fs_aparc_a2009s, freesurfer_lookup, logger)
-    dk_volume = load_label_volume(subject_paths.fs_aparc_dk, freesurfer_lookup, logger)
-    dkt_volume = load_label_volume(subject_paths.fs_aparc_dkt, freesurfer_lookup, logger)
-    xtract_volume = load_label_volume(subject_paths.xtract_volume, xtract_lookup, logger)
-
-    for row in output_rows:
-        scanner_ras = point_from_row(row, ("Scanner_R", "Scanner_A", "Scanner_S"))
-        if not row.get("ROI_D2009_3mm"):
-            row["ROI_D2009_3mm"] = sample_label_volume(d2009_volume, scanner_ras)
-        if not row.get("ROI_DK2005_3mm"):
-            row["ROI_DK2005_3mm"] = sample_label_volume(dk_volume, scanner_ras)
-        if not row.get("Area_fs_vox"):
-            row["Area_fs_vox"] = sample_label_volume(dkt_volume, scanner_ras, radius_mm=0.5)
-        if not row.get("ROI_XTRACT_3mm"):
-            row["ROI_XTRACT_3mm"] = sample_label_volume(xtract_volume, scanner_ras)
-        if not row.get("Matter_3mm") and row.get("ROI_D2009_3mm"):
-            row["Matter_3mm"] = classify_matter(row["ROI_D2009_3mm"])
-        if not row.get("Matter_fs_vox") and row.get("Area_fs_vox"):
-            row["Matter_fs_vox"] = classify_matter(row["Area_fs_vox"])
-
-
-def apply_micro_owner_fallbacks(output_rows: list[dict[str, str]]) -> None:
-    row_by_label = {canonicalize_label(row["Label"]): row for row in output_rows}
-    for row in output_rows:
-        if row.get("Type") != "microwires":
-            continue
-        owner_label = row.get("__owner_label", "")
-        owner_row = row_by_label.get(canonicalize_label(owner_label))
-        if owner_row is None:
-            continue
-        for column in ("ROI_D2009_3mm", "Matter_3mm", "ROI_DK2005_3mm", "ROI_XTRACT_3mm", "Area_fs_vox", "Matter_fs_vox"):
-            if not row.get(column):
-                row[column] = owner_row.get(column, "")
-
-
-def backfill_from_legacy_sidecars(output_rows: list[dict[str, str]], subject_root: Path, subject_code: str, logger: logging.Logger) -> None:
+def backfill_from_recon(output_rows: list[dict[str, str]], subject_root: Path, subject_code: str, logger: logging.Logger) -> None:
     sidecar_maps: dict[str, dict[str, str]] = {}
 
-    d2009 = find_recon_file(subject_root, subject_code, LEGACY_SIDE_CAR_FILES["ROI_D2009_3mm"].format(subject=subject_code))
+    d2009 = find_recon_file(subject_root, subject_code, SIDE_CAR_FILES["ROI_D2009_3mm"].format(subject=subject_code))
     if d2009:
         try:
             sidecar_maps["ROI_D2009_3mm"] = read_label_value_map_from_radius_xlsx(d2009, "Label_Voxel_Radius")
             sidecar_maps["Matter_3mm"] = read_label_value_map_from_radius_xlsx(d2009, "Matter_Voxel_Radius")
-        except Exception as exc:  # pragma: no cover
-            logger.warning("Unable to read legacy D2009 sidecar %s: %s", d2009, exc)
+        except Exception as exc:  # pragma: no cover - defensive path
+            logger.warning("Unable to read D2009 radius sidecar %s: %s", d2009, exc)
 
-    dk2005 = find_recon_file(subject_root, subject_code, LEGACY_SIDE_CAR_FILES["ROI_DK2005_3mm"].format(subject=subject_code))
+    dk2005 = find_recon_file(subject_root, subject_code, SIDE_CAR_FILES["ROI_DK2005_3mm"].format(subject=subject_code))
     if dk2005:
         try:
             sidecar_maps["ROI_DK2005_3mm"] = read_label_value_map_from_radius_xlsx(dk2005, "Label_Voxel_Radius")
         except Exception as exc:  # pragma: no cover
-            logger.warning("Unable to read legacy DK2005 sidecar %s: %s", dk2005, exc)
+            logger.warning("Unable to read DK2005 radius sidecar %s: %s", dk2005, exc)
 
-    xtract = find_recon_file(subject_root, subject_code, LEGACY_SIDE_CAR_FILES["ROI_XTRACT_3mm"].format(subject=subject_code))
+    xtract = find_recon_file(subject_root, subject_code, SIDE_CAR_FILES["ROI_XTRACT_3mm"].format(subject=subject_code))
     if xtract:
         try:
             sidecar_maps["ROI_XTRACT_3mm"] = read_label_value_map_from_radius_xlsx(xtract, "CorrectedLabel")
         except Exception as exc:  # pragma: no cover
-            logger.warning("Unable to read legacy xtract sidecar %s: %s", xtract, exc)
+            logger.warning("Unable to read xtract sidecar %s: %s", xtract, exc)
 
-    fs_atlas = find_recon_file(subject_root, subject_code, LEGACY_SIDE_CAR_FILES["Area_fs_vox"].format(subject=subject_code))
+    fs_atlas = find_recon_file(subject_root, subject_code, SIDE_CAR_FILES["Area_fs_vox"].format(subject=subject_code))
     if fs_atlas:
         try:
             sidecar_maps["Area_fs_vox"] = read_fs_atlas_csv(fs_atlas)
         except Exception as exc:  # pragma: no cover
-            logger.warning("Unable to read legacy FS atlas csv %s: %s", fs_atlas, exc)
+            logger.warning("Unable to read FS atlas csv %s: %s", fs_atlas, exc)
 
     pial = find_recon_file(subject_root, subject_code, f"{subject_code}.PIAL")
     pialvox = find_recon_file(subject_root, subject_code, f"{subject_code}.PIALVOX")
@@ -983,29 +593,61 @@ def backfill_from_legacy_sidecars(output_rows: list[dict[str, str]], subject_roo
                 sidecar = label_map.get(canonicalize_label(row["Label"]))
                 if sidecar is None:
                     continue
-                for column, value in sidecar.items():
-                    if not row.get(column):
-                        row[column] = value
+                for target, values in sidecar.items():
+                    for column, value in values.items():
+                        if not row.get(column):
+                            row[column] = value
         except Exception as exc:  # pragma: no cover
-            logger.warning("Unable to read legacy coordinate sidecars under %s: %s", subject_root, exc)
+            logger.warning("Unable to read coordinate sidecars under %s: %s", subject_root, exc)
 
     for row in output_rows:
         key = canonicalize_label(row["Label"])
         for column, mapping in sidecar_maps.items():
             if not row.get(column):
                 row[column] = mapping.get(key, "")
+        if row.get("Area_fs_vox") and not row.get("Matter_fs_vox"):
+            row["Matter_fs_vox"] = infer_matter_fs(row["Area_fs_vox"])
 
 
-def enrich_from_subject_data(
-    output_rows: list[dict[str, str]],
-    subject_paths: SubjectPaths,
-    subject_code: str,
-    logger: logging.Logger,
-) -> None:
-    ensure_scanner_and_vox_coords(output_rows, subject_paths)
-    sample_subject_atlas_volumes(output_rows, subject_paths, logger)
-    apply_micro_owner_fallbacks(output_rows)
-    backfill_from_legacy_sidecars(output_rows, subject_paths.subject_root, subject_code, logger)
+def build_coordinate_sidecar_map(
+    pial_path: Path,
+    pialvox_path: Path,
+    fsaverage_path: Path,
+    names_path: Path,
+) -> dict[str, dict[str, dict[str, str]]]:
+    pial = read_ascii_matrix(pial_path)
+    pialvox = read_ascii_matrix(pialvox_path)
+    fsaverage = read_ascii_matrix(fsaverage_path)
+    names = parse_electrode_names(names_path)
+    count = min(len(names), len(pial), len(pialvox), len(fsaverage))
+    mapping: dict[str, dict[str, dict[str, str]]] = {}
+    for index in range(count):
+        key = canonicalize_label(names[index])
+        mapping[key] = {
+            "coord": {
+                "Coord_x": format_decimal(pial[index][0]),
+                "Coord_y": format_decimal(pial[index][1]),
+                "Coord_z": format_decimal(pial[index][2]),
+                "x_vox": format_decimal(pialvox[index][0]),
+                "y_vox": format_decimal(pialvox[index][1]),
+                "z_vox": format_decimal(pialvox[index][2]),
+                "MNI305_x": format_decimal(fsaverage[index][0]),
+                "MNI305_y": format_decimal(fsaverage[index][1]),
+                "MNI305_z": format_decimal(fsaverage[index][2]),
+            }
+        }
+    return mapping
+
+
+def infer_matter_fs(area: str) -> str:
+    value = area.casefold()
+    if "unknown" in value:
+        return "Unknown"
+    if "white" in value or "wm" in value:
+        return "White"
+    if value == "na":
+        return "NA"
+    return "Grey"
 
 
 def finalize_row_metadata(output_rows: list[dict[str, str]]) -> None:
@@ -1015,9 +657,7 @@ def finalize_row_metadata(output_rows: list[dict[str, str]]) -> None:
         row["Hemisphere"] = row.get("Hemisphere") or derive_hemisphere(row["Label"])
         row["Manufacturer"] = compute_manufacturer(row["Type"])
         if row.get("Area_fs_vox") and not row.get("Matter_fs_vox"):
-            row["Matter_fs_vox"] = classify_matter(row["Area_fs_vox"])
-        if row.get("ROI_D2009_3mm") and not row.get("Matter_3mm"):
-            row["Matter_3mm"] = classify_matter(row["ROI_D2009_3mm"])
+            row["Matter_fs_vox"] = infer_matter_fs(row["Area_fs_vox"])
     apply_bolt_rules(output_rows)
 
 
@@ -1109,51 +749,11 @@ def decode_nsx_field(value: object) -> str:
     return str(value).strip()
 
 
-def canonicalize_nsx_label(label: str) -> str:
-    normalized = re.sub(r"-\d+$", "", str(label).strip())
-    return canonicalize_label(normalized)
-
-
-def build_ns5_bundle_map(ns5_channels: list[NSxChannel]) -> dict[str, list[NSxChannel]]:
-    grouped: dict[str, list[NSxChannel]] = {}
-    for channel in ns5_channels:
-        if not channel.label:
-            continue
-        normalized = re.sub(r"-\d+$", "", channel.label)
-        stem, suffix = split_label(normalized)
-        if suffix is None or not normalized.startswith(("m", "M")):
-            continue
-        grouped.setdefault(stem.casefold(), []).append(
-            NSxChannel(
-                source=channel.source,
-                index=channel.index,
-                electrode_id=channel.electrode_id,
-                label=normalized,
-            )
-        )
-
-    representative_map: dict[str, list[NSxChannel]] = {}
-    for _, channels in grouped.items():
-        ordered = sorted(channels, key=lambda item: split_label(item.label)[1] or 0)
-        representative_map[canonicalize_label(ordered[0].label)] = ordered
-    return representative_map
-
-
-def run_xtract_helper(subject_root: Path, xtract_assets_root: Path, logger: logging.Logger) -> None:
-    helper = Path(__file__).resolve().parents[2] / "scripts" / "run_xtract_rave_subject.sh"
-    if not helper.exists():
-        raise ElectrodeBuildError(f"Xtract helper script not found: {helper}")
-    command = ["bash", str(helper), str(subject_root), str(xtract_assets_root)]
-    logger.info("Running xtract helper: %s", " ".join(command))
-    subprocess.run(command, check=True)
-
-
 def assign_nsx_metadata(
     output_rows: list[dict[str, str]],
     bundles: list[MicroBundle],
     ns3_channels: list[NSxChannel],
     ns5_channels: list[NSxChannel],
-    logger: logging.Logger,
 ) -> None:
     ns3_by_label = {canonicalize_label(channel.label): channel for channel in ns3_channels if channel.label}
     ns3_by_id = {str(channel.electrode_id): channel for channel in ns3_channels if str(channel.electrode_id)}
@@ -1167,40 +767,16 @@ def assign_nsx_metadata(
         row["NSxIndex"] = str(channel.index)
         row["NSxElectrodeID"] = channel.electrode_id
 
-    ns5_by_label = {canonicalize_nsx_label(channel.label): channel for channel in ns5_channels if channel.label}
-    ns5_by_id = {str(channel.electrode_id): channel for channel in ns5_channels if str(channel.electrode_id)}
-    ns5_bundle_map = build_ns5_bundle_map(ns5_channels)
+    ns5_by_label = {canonicalize_label(channel.label): channel for channel in ns5_channels if channel.label}
     row_by_label = {canonicalize_label(row["Label"]): row for row in output_rows}
     for bundle in bundles:
         micro_row = row_by_label.get(canonicalize_label(bundle.representative_label))
         if micro_row is None:
             continue
-
-        label_matches = [ns5_by_label.get(canonicalize_label(label)) for label in bundle.contact_labels]
-        label_matches = [channel for channel in label_matches if channel is not None]
-        id_matches = [ns5_by_id.get(str(electrode_id)) for electrode_id in bundle.electrode_ids]
-        id_matches = [channel for channel in id_matches if channel is not None]
-        bundle_matches = ns5_bundle_map.get(canonicalize_label(bundle.representative_label), [])
-
-        channels = label_matches if len(label_matches) == len(bundle.contact_labels) else []
-        if not channels and len(bundle_matches) == len(bundle.contact_labels):
-            channels = bundle_matches
-        if not channels and id_matches:
-            channels = id_matches
-        if not channels and label_matches:
-            channels = label_matches
-
+        channels = [ns5_by_label.get(canonicalize_label(label)) for label in bundle.contact_labels]
+        channels = [channel for channel in channels if channel is not None]
         if not channels:
-            logger.warning("No ns5 channels resolved for micro bundle %s", bundle.representative_label)
             continue
-        if len(channels) != len(bundle.contact_labels):
-            logger.warning(
-                "Partial ns5 mapping for %s: matched %d of %d contacts",
-                bundle.representative_label,
-                len(channels),
-                len(bundle.contact_labels),
-            )
-
         micro_row["NSxSource"] = "ns5"
         micro_row["NSxIndex"] = range_or_scalar([str(channel.index) for channel in channels])
         micro_row["NSxElectrodeID"] = range_or_scalar([channel.electrode_id for channel in channels])
@@ -1226,26 +802,19 @@ def build_electrodes_v2026(
     ns3: Path | None = None,
     ns5: Path | None = None,
     strict: bool = False,
-    run_xtract: bool = False,
-    xtract_assets_root: Path | None = None,
     logger: logging.Logger | None = None,
 ) -> Path:
     logger = logger or LOGGER
     rave_rows = read_csv_rows(input_csv)
     subject_code = discover_subject_code(rave_rows, input_csv)
-    subject_paths = resolve_subject_paths(subject_root, subject_code)
-    if run_xtract and subject_paths.xtract_volume is None:
-        if xtract_assets_root is None:
-            raise ElectrodeBuildError("--run-xtract requires --xtract-assets-root")
-        run_xtract_helper(subject_root, xtract_assets_root, logger)
-        subject_paths = resolve_subject_paths(subject_root, subject_code)
     macros, bundles = load_montage(montage)
     rave_index = build_rave_index(rave_rows)
     pairs = validate_macros(macros, rave_index)
 
     output_rows = [output_row_from_macro(montage_row, rave_row) for montage_row, rave_row in pairs]
-    row_by_label = {canonicalize_label(row["Label"]): row for row in output_rows}
+    backfill_from_recon(output_rows, subject_root, subject_code, logger)
 
+    row_by_label = {canonicalize_label(row["Label"]): row for row in output_rows}
     for bundle in bundles:
         owner_key = canonicalize_label(bundle.owner_label)
         owner_row = row_by_label.get(owner_key)
@@ -1262,21 +831,13 @@ def build_electrodes_v2026(
                 raise ElectrodeBuildError(message)
             logger.warning(message)
             continue
-        output_rows.append(
-            synthesize_micro_row(
-                bundle,
-                owner_row,
-                shaft_rows,
-                synthetic_electrode_id=next_synthetic_electrode_id(output_rows),
-            )
-        )
+        output_rows.append(synthesize_micro_row(bundle, owner_row, shaft_rows))
 
-    enrich_from_subject_data(output_rows, subject_paths, subject_code, logger)
     finalize_row_metadata(output_rows)
 
     ns3_channels = parse_nsx_channels(ns3, "ns3", logger) if ns3 else []
     ns5_channels = parse_nsx_channels(ns5, "ns5", logger) if ns5 else []
-    assign_nsx_metadata(output_rows, bundles, ns3_channels, ns5_channels, logger)
+    assign_nsx_metadata(output_rows, bundles, ns3_channels, ns5_channels)
 
     destination = output_csv or default_output_path(input_csv, subject_code)
     write_output_csv(destination, output_rows)
@@ -1290,13 +851,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     build = subparsers.add_parser("build", help="Build an electrodes_v2026 CSV.")
     build.add_argument("--input-csv", required=True, type=Path, help="Path to RAVE electrodes.csv")
     build.add_argument("--montage", required=True, type=Path, help="Path to montage xlsx")
-    build.add_argument("--subject-root", required=True, type=Path, help="RAVE raw_dir subject root; legacy elec_recon roots remain supported as fallback")
+    build.add_argument("--subject-root", required=True, type=Path, help="Subject root or elec_recon root")
     build.add_argument("--ns3", type=Path, help="Optional NS3 file for macro metadata")
     build.add_argument("--ns5", type=Path, help="Optional NS5 file for micro metadata")
     build.add_argument("--output", type=Path, help="Optional output CSV path")
     build.add_argument("--strict", action="store_true", help="Fail on recoverable warnings such as missing micro owners")
-    build.add_argument("--run-xtract", action="store_true", help="Run the repo xtract helper if the subject-space xtract volume is missing")
-    build.add_argument("--xtract-assets-root", type=Path, help="Root containing MNI152 and xtract atlas assets for --run-xtract")
     build.add_argument("--verbose", action="store_true", help="Enable info-level logging")
     return parser
 
@@ -1318,8 +877,6 @@ def main(argv: list[str] | None = None) -> int:
             ns3=args.ns3,
             ns5=args.ns5,
             strict=args.strict,
-            run_xtract=args.run_xtract,
-            xtract_assets_root=args.xtract_assets_root,
             logger=LOGGER,
         )
         return 0

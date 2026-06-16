@@ -1,3 +1,17 @@
+Metadata-Version: 2.4
+Name: recon-scripts
+Version: 0.1.0
+Summary: Electrode reconstruction utilities for lab workflows.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24
+Requires-Dist: pandas>=2.0
+Requires-Dist: openpyxl>=3.1
+Requires-Dist: nibabel>=5.0
+Requires-Dist: neo>=0.13
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+
 # recon-scripts
 
 Scripting for electrode reconstruction.
@@ -13,7 +27,7 @@ RAVE `electrodes.csv` into a lab-ready `{patient}-electrodes_v2026.csv`.
 - Synthesizes one bundled micro row per 8-contact micro set from montage `Sheet2`
 - Preserves the first 27 v2025 output columns in the expected order
 - Appends lab bookkeeping columns:
-  `MicroContactRange`, `MontageElectrodeIDRange`, `NSxSource`, `NSxIndex`, `NSxElectrodeID`
+  `MicroContactRange`, `NSxSource`, `NSxIndex`, `NSxElectrodeID`
 - Uses RAVE-native subject roots under `raw_dir/<subject>/rave-imaging/...` first
 - Maps macro atlas fields directly from existing RAVE `FSLabel_*` columns
 - Falls back to subject imaging products for transform-derived coordinates and optional atlas sampling
@@ -28,8 +42,6 @@ recon-electrodes build \
   --subject-root /path/to/raw_dir/YFW \
   --ns3 /path/to/file.ns3 \
   --ns5 /path/to/file.ns5 \
-  --run-xtract \
-  --xtract-assets-root /Volumes/projectworlds/EMU-18112/ElectrodeLabelsROIs \
   --output /path/to/YFW-electrodes_v2026.csv
 ```
 
@@ -38,7 +50,6 @@ recon-electrodes build \
 - `--subject-root` should usually be the RAVE subject root, for example `.../rave_data/raw_dir/YFW`.
 - Legacy `elec_recon`-style sidecars are still used as a fallback when present.
 - NSx parsing is best-effort. If `neo` is unavailable or a file cannot be parsed, the CSV is still written and NSx columns are left blank.
-- Synthetic micro rows receive unique `ElectrodeID` values; montage and NS5 ranges are stored in their own columns.
 - Macro atlas fields come from RAVE first; synthetic micro atlas fields are sampled from subject imaging products when available and otherwise fall back to the owning macro row.
 
 ### Optional Xtract Helper
@@ -52,5 +63,3 @@ scripts/run_xtract_rave_subject.sh \
 ```
 
 This helper writes subject-space xtract volumes under `rave-imaging/derivative/`, where the formatter will auto-discover them on later runs.
-
-The helper is RAVE-native: it uses the subject T1 under `rave-imaging/derivative/` or `rave-imaging/fs/mri/`, plus the atlas assets under `ElectrodeLabelsROIs`. The legacy `elec_recon` text exports like `.PIAL`, `.PIALVOX`, `.LEPTO`, and `.FSAVERAGE` are not required for the xtract warp itself.
