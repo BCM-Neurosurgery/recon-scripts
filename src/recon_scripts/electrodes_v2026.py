@@ -1090,20 +1090,8 @@ def reconcile_and_sort_output_rows(output_rows: list[dict[str, str]], logger: lo
     for row in output_rows:
         nsx_span = parse_order_span(row.get("NSxIndex", ""))
         montage_span = parse_order_span(row.get("MontageElectrodeID", ""))
-        if nsx_span is not None and montage_span is not None and nsx_span != montage_span:
-            logger.warning(
-                "Ordering mismatch for %s: NSxIndex %s != MontageElectrodeID %s; following NSxIndex",
-                row.get("Label", ""),
-                row.get("NSxIndex", ""),
-                row.get("MontageElectrodeID", ""),
-            )
+        if nsx_span is not None and montage_span is None:
             row["MontageElectrodeID"] = row.get("NSxIndex", "")
-            montage_span = nsx_span
-        elif nsx_span is None and montage_span is not None:
-            row["NSxIndex"] = row.get("NSxIndex", "")
-        elif nsx_span is not None and montage_span is None:
-            row["MontageElectrodeID"] = row.get("NSxIndex", "")
-            montage_span = nsx_span
 
         if row.get("MontageElectrodeID", "").strip():
             row["ElectrodeID"] = row["MontageElectrodeID"]
@@ -1121,6 +1109,43 @@ def reconcile_and_sort_output_rows(output_rows: list[dict[str, str]], logger: lo
         return (type_rank, start, end, 0 if nsx_span is not None else 1, canonicalize_label(row.get("Label", "")))
 
     output_rows.sort(key=sort_key)
+
+    for type_rank, type_name in ((0, "macro"), (1, "microwire")):
+        comparable_rows = [
+            row for row in output_rows
+            if (1 if row.get("Type") == "microwires" else 0) == type_rank
+            and parse_order_span(row.get("NSxIndex", "")) is not None
+            and parse_order_span(row.get("MontageElectrodeID", "")) is not None
+        ]
+        if len(comparable_rows) < 2:
+            continue
+        nsx_order = [
+            row.get("Label", "")
+            for row in sorted(
+                comparable_rows,
+                key=lambda row: (
+                    parse_order_span(row.get("NSxIndex", "")) or (10**9, 10**9),
+                    canonicalize_label(row.get("Label", "")),
+                ),
+            )
+        ]
+        montage_order = [
+            row.get("Label", "")
+            for row in sorted(
+                comparable_rows,
+                key=lambda row: (
+                    parse_order_span(row.get("MontageElectrodeID", "")) or (10**9, 10**9),
+                    canonicalize_label(row.get("Label", "")),
+                ),
+            )
+        ]
+        if nsx_order != montage_order:
+            logger.warning(
+                "Ordering mismatch in %s rows: NSxIndex order %s differs from MontageElectrodeID order %s; following NSxIndex when available",
+                type_name,
+                nsx_order,
+                montage_order,
+            )
 
 
 def mark_micro_owners(output_rows: list[dict[str, str]]) -> None:

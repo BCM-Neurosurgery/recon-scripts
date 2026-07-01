@@ -373,10 +373,10 @@ def test_reconcile_and_sort_output_rows_prefers_nsx_then_montage_and_macro_tiebr
     reconcile_and_sort_output_rows(rows, logging.getLogger("test"))
 
     assert [row["Label"] for row in rows] == ["RF30F01", "LT2aA01", "LT2aA02", "mRF30F01"]
-    assert rows[0]["ElectrodeID"] == "1"
-    assert rows[0]["MontageElectrodeID"] == "1"
-    assert rows[3]["ElectrodeID"] == "1-8"
-    assert rows[3]["MontageElectrodeID"] == "1-8"
+    assert rows[0]["ElectrodeID"] == "33"
+    assert rows[0]["MontageElectrodeID"] == "33"
+    assert rows[3]["ElectrodeID"] == "201-208"
+    assert rows[3]["MontageElectrodeID"] == "201-208"
 
 
 def test_reconcile_and_sort_output_rows_uses_montage_when_nsx_missing() -> None:
@@ -515,8 +515,8 @@ def test_build_electrodes_v2026_rave_layout_integration(tmp_path: Path) -> None:
     assert rows[0]["Matter_fs_vox"] == "Grey"
     assert rows[2]["Label"] == "mLT2aA01"
     assert rows[2]["Type"] == "microwires"
-    assert rows[2]["ElectrodeID"] == "1-8"
-    assert rows[2]["MontageElectrodeID"] == "1-8"
+    assert rows[2]["ElectrodeID"] == "89-96"
+    assert rows[2]["MontageElectrodeID"] == "89-96"
     assert rows[2]["RAVE_Label"] == "MLT2AA01"
     assert rows[2]["ProbeName"] == "mLT2aA"
     assert rows[2]["Radius"] == "0.5"
