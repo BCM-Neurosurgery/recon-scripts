@@ -51,6 +51,9 @@ OUTPUT_COLUMNS = [
     "NSxSource",
     "NSxIndex",
     "NSxElectrodeID",
+    "RAVE_Label",
+    "ProbeName",
+    "Radius",
 ]
 
 ROW_ALIAS_MAP = {
@@ -200,6 +203,41 @@ def split_label(label: str) -> tuple[str, int | None]:
         return str(label).strip(), None
     stem, suffix = match.groups()
     return stem, int(suffix)
+
+
+def strip_nsx_contact_suffix(label: str) -> str:
+    return re.sub(r"[-_\s]+\d+$", "", str(label or "").strip())
+
+
+def normalize_nsx_label(label: str) -> str:
+    return strip_nsx_contact_suffix(str(label or "").strip())
+
+
+def ensure_micro_label(label: str) -> str:
+    normalized = normalize_nsx_label(label)
+    if not normalized:
+        return ""
+    if normalized.startswith(("m", "M")):
+        return normalized
+    stem, suffix = split_label(normalized)
+    if suffix is None:
+        return normalized
+    if stem.startswith(("L", "l", "R", "r")):
+        return f"m{stem}{suffix:02d}"
+    return normalized
+
+
+def uppercase_label(label: str) -> str:
+    return str(label or "").strip().upper()
+
+
+def compute_probe_name(label: str) -> str:
+    stem, _ = split_label(label)
+    return stem
+
+
+def compute_radius(label: str) -> str:
+    return "0.5" if str(label or "").startswith(("m", "M")) else "1"
 
 
 def read_csv_rows(path: Path, delimiter: str = ",") -> list[dict[str, str]]:
@@ -410,7 +448,10 @@ def load_montage(path: Path) -> tuple[list[MontageRow], list[MicroBundle]]:
         label = row.get("ChannelLabel", "").strip()
         if not label or label.casefold() == "empty":
             continue
-        stem, _ = split_label(label)
+        normalized_label = ensure_micro_label(label)
+        row = dict(row)
+        row["ChannelLabel"] = normalized_label
+        stem, _ = split_label(normalized_label)
         grouped.setdefault(stem, []).append(row)
 
     bundles: list[MicroBundle] = []
@@ -499,14 +540,11 @@ def normalize_type(value: str, label: str) -> str:
     return source
 
 
-def compute_manufacturer(row_type: str) -> str:
-    if row_type in {"sEEG", "sEEG-micro", "microwires"}:
-        return "Ad-Tech"
-    if row_type in {"REF", "GND", "External", "empty"}:
-        return "NA"
-    if row_type == "DBS":
-        return "Boston Scientific"
-    return "NA"
+def compute_manufacturer(prototype: str) -> str:
+    value = str(prototype or "").strip()
+    if re.search(r"PMT", value, flags=re.IGNORECASE):
+        return "PMT"
+    return "Ad-Tech"
 
 
 def classify_matter(label: str) -> str:
@@ -545,9 +583,23 @@ def output_row_from_macro(montage_row: MontageRow, rave_row: dict[str, str]) -> 
     output["ElectrodeID"] = montage_row.electrode_id
     output["Label"] = montage_row.channel_label
     output["MontageElectrodeID"] = montage_row.electrode_id
+    output["RAVE_Label"] = uppercase_label(rave_row.get("Label", montage_row.channel_label))
+    output["ProbeName"] = compute_probe_name(output["Label"])
+    output["Radius"] = compute_radius(output["Label"])
+    output["__prototype"] = str(rave_row.get("Prototype", "")).strip()
 
     for column in OUTPUT_COLUMNS:
-        if column in {"ElectrodeID", "Label", "MontageElectrodeID", "NSxSource", "NSxIndex", "NSxElectrodeID"}:
+        if column in {
+            "ElectrodeID",
+            "Label",
+            "MontageElectrodeID",
+            "NSxSource",
+            "NSxIndex",
+            "NSxElectrodeID",
+            "RAVE_Label",
+            "ProbeName",
+            "Radius",
+        }:
             continue
         if column in rave_row and str(rave_row[column]).strip():
             output[column] = str(rave_row[column]).strip()
@@ -555,7 +607,7 @@ def output_row_from_macro(montage_row: MontageRow, rave_row: dict[str, str]) -> 
     apply_rave_macro_mappings(output, rave_row)
     output["Type"] = normalize_type(output.get("Type", ""), output["Label"])
     output["Hemisphere"] = output.get("Hemisphere") or derive_hemisphere(output["Label"])
-    output["Manufacturer"] = output.get("Manufacturer") or compute_manufacturer(output["Type"])
+    output["Manufacturer"] = compute_manufacturer(output.get("__prototype", ""))
     output["Bolt"] = output.get("Bolt") or "0"
     return output
 
@@ -616,6 +668,18 @@ def range_or_scalar(values: list[str]) -> str:
     return f"{compact[0]}-{compact[-1]}"
 
 
+def parse_order_span(value: str) -> tuple[int, int] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = re.fullmatch(r"(\d+)(?:-(\d+))?", text)
+    if not match:
+        return None
+    start = int(match.group(1))
+    end = int(match.group(2) or match.group(1))
+    return (start, end)
+
+
 def next_synthetic_electrode_id(output_rows: list[dict[str, str]]) -> int:
     numeric_ids = [
         int(row["ElectrodeID"])
@@ -642,9 +706,13 @@ def synthesize_micro_row(
     output["ElectrodeID"] = str(synthetic_electrode_id)
     output["Label"] = bundle.representative_label
     output["MontageElectrodeID"] = range_or_scalar(bundle.electrode_ids)
+    output["RAVE_Label"] = uppercase_label(bundle.representative_label)
+    output["ProbeName"] = compute_probe_name(output["Label"])
+    output["Radius"] = compute_radius(output["Label"])
     output["Type"] = "microwires"
     output["Hemisphere"] = derive_hemisphere(bundle.representative_label)
-    output["Manufacturer"] = compute_manufacturer(output["Type"])
+    output["__prototype"] = owner_row.get("__prototype", "")
+    output["Manufacturer"] = compute_manufacturer(output.get("__prototype", ""))
     output["Bolt"] = owner_row.get("Bolt", "0")
     output["__owner_label"] = owner_row["Label"]
 
@@ -1007,12 +1075,52 @@ def finalize_row_metadata(output_rows: list[dict[str, str]]) -> None:
     for row in output_rows:
         row["Type"] = normalize_type(row.get("Type", ""), row["Label"])
         row["Hemisphere"] = row.get("Hemisphere") or derive_hemisphere(row["Label"])
-        row["Manufacturer"] = compute_manufacturer(row["Type"])
+        row["Manufacturer"] = compute_manufacturer(row.get("__prototype", ""))
+        row["RAVE_Label"] = row.get("RAVE_Label") or uppercase_label(row["Label"])
+        row["ProbeName"] = row.get("ProbeName") or compute_probe_name(row["Label"])
+        row["Radius"] = row.get("Radius") or compute_radius(row["Label"])
         if row.get("Area_fs_vox") and not row.get("Matter_fs_vox"):
             row["Matter_fs_vox"] = classify_matter(row["Area_fs_vox"])
         if row.get("ROI_D2009_3mm") and not row.get("Matter_3mm"):
             row["Matter_3mm"] = classify_matter(row["ROI_D2009_3mm"])
     apply_bolt_rules(output_rows)
+
+
+def reconcile_and_sort_output_rows(output_rows: list[dict[str, str]], logger: logging.Logger) -> None:
+    for row in output_rows:
+        nsx_span = parse_order_span(row.get("NSxIndex", ""))
+        montage_span = parse_order_span(row.get("MontageElectrodeID", ""))
+        if nsx_span is not None and montage_span is not None and nsx_span != montage_span:
+            logger.warning(
+                "Ordering mismatch for %s: NSxIndex %s != MontageElectrodeID %s; following NSxIndex",
+                row.get("Label", ""),
+                row.get("NSxIndex", ""),
+                row.get("MontageElectrodeID", ""),
+            )
+            row["MontageElectrodeID"] = row.get("NSxIndex", "")
+            montage_span = nsx_span
+        elif nsx_span is None and montage_span is not None:
+            row["NSxIndex"] = row.get("NSxIndex", "")
+        elif nsx_span is not None and montage_span is None:
+            row["MontageElectrodeID"] = row.get("NSxIndex", "")
+            montage_span = nsx_span
+
+        if row.get("MontageElectrodeID", "").strip():
+            row["ElectrodeID"] = row["MontageElectrodeID"]
+
+    def sort_key(row: dict[str, str]) -> tuple[int, int, int, int, str]:
+        nsx_span = parse_order_span(row.get("NSxIndex", ""))
+        montage_span = parse_order_span(row.get("MontageElectrodeID", ""))
+        primary = nsx_span or montage_span
+        if primary is None:
+            start = 10**9
+            end = 10**9
+        else:
+            start, end = primary
+        type_rank = 1 if row.get("Type") == "microwires" else 0
+        return (type_rank, start, end, 0 if nsx_span is not None else 1, canonicalize_label(row.get("Label", "")))
+
+    output_rows.sort(key=sort_key)
 
 
 def mark_micro_owners(output_rows: list[dict[str, str]]) -> None:
@@ -1099,12 +1207,17 @@ def decode_nsx_field(value: object) -> str:
     if value is None:
         return ""
     if isinstance(value, bytes):
-        return value.decode("utf-8", errors="ignore").strip("\x00 ").strip()
-    return str(value).strip()
+        return value.decode("utf-8", errors="ignore").strip("\x00 ").strip().strip("'\"")
+    return str(value).strip().strip("'\"")
 
 
 def canonicalize_nsx_label(label: str) -> str:
-    normalized = re.sub(r"-\d+$", "", str(label).strip())
+    normalized = normalize_nsx_label(label)
+    return canonicalize_label(normalized)
+
+
+def canonicalize_ns5_micro_label(label: str) -> str:
+    normalized = ensure_micro_label(label)
     return canonicalize_label(normalized)
 
 
@@ -1113,7 +1226,7 @@ def build_ns5_bundle_map(ns5_channels: list[NSxChannel]) -> dict[str, list[NSxCh
     for channel in ns5_channels:
         if not channel.label:
             continue
-        normalized = re.sub(r"-\d+$", "", channel.label)
+        normalized = ensure_micro_label(channel.label)
         stem, suffix = split_label(normalized)
         if suffix is None or not normalized.startswith(("m", "M")):
             continue
@@ -1160,7 +1273,7 @@ def assign_nsx_metadata(
     ns5_channels: list[NSxChannel],
     logger: logging.Logger,
 ) -> None:
-    ns3_by_label = {canonicalize_label(channel.label): channel for channel in ns3_channels if channel.label}
+    ns3_by_label = {canonicalize_nsx_label(channel.label): channel for channel in ns3_channels if channel.label}
     ns3_by_id = {str(channel.electrode_id): channel for channel in ns3_channels if str(channel.electrode_id)}
     for row in output_rows:
         if row["Type"] == "microwires":
@@ -1172,7 +1285,7 @@ def assign_nsx_metadata(
         row["NSxIndex"] = str(channel.index)
         row["NSxElectrodeID"] = channel.electrode_id
 
-    ns5_by_label = {canonicalize_nsx_label(channel.label): channel for channel in ns5_channels if channel.label}
+    ns5_by_label = {canonicalize_ns5_micro_label(channel.label): channel for channel in ns5_channels if channel.label}
     ns5_by_id = {str(channel.electrode_id): channel for channel in ns5_channels if str(channel.electrode_id)}
     ns5_bundle_map = build_ns5_bundle_map(ns5_channels)
     row_by_label = {canonicalize_label(row["Label"]): row for row in output_rows}
@@ -1288,6 +1401,7 @@ def build_electrodes_v2026(
     ns3_channels = parse_nsx_channels(ns3, "ns3", logger) if ns3 else []
     ns5_channels = parse_nsx_channels(ns5, "ns5", logger) if ns5 else []
     assign_nsx_metadata(output_rows, bundles, ns3_channels, ns5_channels, logger)
+    reconcile_and_sort_output_rows(output_rows, logger)
 
     destination = output_csv or default_output_path(input_csv, subject_code)
     write_output_csv(destination, output_rows)

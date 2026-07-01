@@ -23,6 +23,7 @@ from recon_scripts.electrodes_v2026 import (
     compute_manufacturer,
     load_montage,
     output_row_from_macro,
+    reconcile_and_sort_output_rows,
     resolve_subject_paths,
     sample_label_volume,
     synthesize_micro_row,
@@ -37,10 +38,10 @@ def test_canonicalize_label_handles_case_and_zero_padding() -> None:
 
 
 def test_compute_manufacturer_and_matter_mapping() -> None:
-    assert compute_manufacturer("sEEG") == "Ad-Tech"
-    assert compute_manufacturer("sEEG-micro") == "Ad-Tech"
-    assert compute_manufacturer("microwires") == "Ad-Tech"
-    assert compute_manufacturer("REF") == "NA"
+    assert compute_manufacturer("PMT prototype") == "PMT"
+    assert compute_manufacturer("ADTECH prototype") == "Ad-Tech"
+    assert compute_manufacturer("anything else") == "Ad-Tech"
+    assert compute_manufacturer("") == "Ad-Tech"
     assert classify_matter("Left-Cerebral-White-Matter") == "White"
     assert classify_matter("Left-Hippocampus") == "Subcortical"
     assert classify_matter("ctx-rh-rostralanteriorcingulate") == "Grey"
@@ -75,6 +76,34 @@ def test_load_montage_groups_micro_bundles(tmp_path: Path) -> None:
     assert bundles[0].contact_labels == [f"mLT2aA0{i}" for i in range(1, 9)]
 
 
+def test_load_montage_normalizes_micro_labels_with_m_prefix(tmp_path: Path) -> None:
+    montage = tmp_path / "montage.xlsx"
+    write_simple_xlsx(
+        montage,
+        {
+            "Sheet1": [
+                ["TBarPinID", "ElectrodeID", "ChannelLabel"],
+                ["A01", "1", "RF30F01"],
+                ["A02", "2", "RF30F02"],
+            ],
+            "Sheet2": [
+                ["TBarPinID", "ElectrodeID", "ChannelLabel"],
+                ["A01", "11", "RF30F01"],
+                ["A02", "12", "RF30F02"],
+                ["A03", "13", "RF30F03"],
+                ["A04", "14", "RF30F04"],
+                ["A05", "15", "RF30F05"],
+                ["A06", "16", "RF30F06"],
+                ["A07", "17", "RF30F07"],
+                ["A08", "18", "RF30F08"],
+            ],
+        },
+    )
+    _, bundles = load_montage(montage)
+    assert bundles[0].representative_label == "mRF30F01"
+    assert bundles[0].contact_labels == [f"mRF30F0{i}" for i in range(1, 9)]
+
+
 def test_output_row_from_macro_maps_rave_atlas_fields() -> None:
     row = output_row_from_macro(
         MontageRow(electrode_id="33", channel_label="LT2aA01", sheet="Sheet1"),
@@ -86,6 +115,7 @@ def test_output_row_from_macro_maps_rave_atlas_fields() -> None:
             "Coord_z": "3",
             "LocationType": "iEEG",
             "Hemisphere": "Left",
+            "Prototype": "ADTECH SEEG",
             "FSLabel_aparc_a2009s_aseg": "Left-Hippocampus",
             "FSLabel_aparc_aseg": "Left-Cerebral-White-Matter",
             "FSLabel_aparc_DKTatlas_aseg": "ctx-lh-insula",
@@ -103,6 +133,10 @@ def test_output_row_from_macro_maps_rave_atlas_fields() -> None:
     assert row["ElectrodeID"] == "33"
     assert row["Label"] == "LT2aA01"
     assert row["MontageElectrodeID"] == "33"
+    assert row["RAVE_Label"] == "LT2AA1"
+    assert row["ProbeName"] == "LT2aA"
+    assert row["Radius"] == "1"
+    assert row["Manufacturer"] == "Ad-Tech"
     assert row["ROI_D2009_3mm"] == "Left-Hippocampus"
     assert row["ROI_DK2005_3mm"] == "Left-Cerebral-White-Matter"
     assert row["Area_fs_vox"] == "ctx-lh-insula"
@@ -171,6 +205,10 @@ def test_synthesize_micro_row_projects_three_mm_deeper() -> None:
     assert row["Coord_z"] == "-3"
     assert row["MNI305_z"] == "-3.15"
     assert row["MontageElectrodeID"] == "1-8"
+    assert row["RAVE_Label"] == "MLT2AA01"
+    assert row["ProbeName"] == "mLT2aA"
+    assert row["Radius"] == "0.5"
+    assert row["Manufacturer"] == "Ad-Tech"
 
 
 def test_sample_label_volume_returns_majority_label() -> None:
@@ -212,6 +250,24 @@ def test_assign_nsx_metadata_falls_back_to_electrode_id_range() -> None:
     assert output_rows[1]["NSxElectrodeID"] == "89-96"
 
 
+def test_assign_nsx_metadata_matches_ns3_labels_case_insensitive_and_zero_padded() -> None:
+    output_rows = [
+        {"Label": "LT2aA01", "ElectrodeID": "33", "Type": "sEEG", "NSxSource": "", "NSxIndex": "", "NSxElectrodeID": ""},
+        {"Label": "LT2aA11", "ElectrodeID": "43", "Type": "sEEG", "NSxSource": "", "NSxIndex": "", "NSxElectrodeID": ""},
+    ]
+    ns3 = [
+        NSxChannel(source="ns3", index=1, electrode_id="33", label="lt2Aa1"),
+        NSxChannel(source="ns3", index=11, electrode_id="43", label="LT2AA11"),
+    ]
+
+    assign_nsx_metadata(output_rows, [], ns3, [], logging.getLogger("test"))
+
+    assert output_rows[0]["NSxSource"] == "ns3"
+    assert output_rows[0]["NSxIndex"] == "1"
+    assert output_rows[1]["NSxSource"] == "ns3"
+    assert output_rows[1]["NSxIndex"] == "11"
+
+
 def test_assign_nsx_metadata_matches_ns5_labels_with_suffixes() -> None:
     output_rows = [
         {"Label": "mLT2aA01", "ElectrodeID": "257", "Type": "microwires", "NSxSource": "", "NSxIndex": "", "NSxElectrodeID": ""},
@@ -236,6 +292,66 @@ def test_assign_nsx_metadata_matches_ns5_labels_with_suffixes() -> None:
     assert output_rows[0]["NSxElectrodeID"] == "373-380"
 
 
+def test_assign_nsx_metadata_matches_ns5_labels_case_insensitive_and_zero_padded() -> None:
+    output_rows = [
+        {"Label": "mRF30F01", "ElectrodeID": "257", "Type": "microwires", "NSxSource": "", "NSxIndex": "", "NSxElectrodeID": ""},
+    ]
+    bundles = [
+        MicroBundle(
+            stem="mRF30F",
+            representative_label="mRF30F01",
+            contact_labels=[f"mRF30F0{i}" for i in range(1, 9)],
+            electrode_ids=[str(i) for i in range(201, 209)],
+        )
+    ]
+    ns5 = [
+        NSxChannel(source="ns5", index=index, electrode_id=str(600 + index), label=label)
+        for index, label in enumerate(
+            [
+                "Mrf30f1-001",
+                "mRF30F2-002",
+                "MRF30F3-003",
+                "mrf30f4-004",
+                "RF30F5-005",
+                "rf30f6-006",
+                "RF30F7-007",
+                "rf30f8-008",
+            ],
+            start=1,
+        )
+    ]
+
+    assign_nsx_metadata(output_rows, bundles, [], ns5, logging.getLogger("test"))
+
+    assert output_rows[0]["NSxSource"] == "ns5"
+    assert output_rows[0]["NSxIndex"] == "1-8"
+    assert output_rows[0]["NSxElectrodeID"] == "601-608"
+
+
+def test_assign_nsx_metadata_matches_ns5_labels_without_micro_prefix() -> None:
+    output_rows = [
+        {"Label": "mRF30F01", "ElectrodeID": "257", "Type": "microwires", "NSxSource": "", "NSxIndex": "", "NSxElectrodeID": ""},
+    ]
+    bundles = [
+        MicroBundle(
+            stem="mRF30F",
+            representative_label="mRF30F01",
+            contact_labels=[f"mRF30F0{i}" for i in range(1, 9)],
+            electrode_ids=[str(i) for i in range(201, 209)],
+        )
+    ]
+    ns5 = [
+        NSxChannel(source="ns5", index=index, electrode_id=str(500 + index), label=f"RF30F0{i}-{index:03d}")
+        for index, i in enumerate(range(1, 9), start=1)
+    ]
+
+    assign_nsx_metadata(output_rows, bundles, [], ns5, logging.getLogger("test"))
+
+    assert output_rows[0]["NSxSource"] == "ns5"
+    assert output_rows[0]["NSxIndex"] == "1-8"
+    assert output_rows[0]["NSxElectrodeID"] == "501-508"
+
+
 def test_apply_bolt_rules_marks_terminal_unknown_contact() -> None:
     rows = [
         {"Label": "LT2aA01", "Matter_3mm": "Grey", "Matter_fs_vox": "Unknown", "Bolt": "0"},
@@ -244,6 +360,36 @@ def test_apply_bolt_rules_marks_terminal_unknown_contact() -> None:
     ]
     apply_bolt_rules(rows)
     assert [row["Bolt"] for row in rows] == ["0", "0", "1"]
+
+
+def test_reconcile_and_sort_output_rows_prefers_nsx_then_montage_and_macro_tiebreak() -> None:
+    rows = [
+        {"Label": "mRF30F01", "Type": "microwires", "NSxIndex": "1-8", "MontageElectrodeID": "201-208", "ElectrodeID": "257"},
+        {"Label": "RF30F01", "Type": "sEEG-micro", "NSxIndex": "1", "MontageElectrodeID": "33", "ElectrodeID": "33"},
+        {"Label": "LT2aA01", "Type": "sEEG", "NSxIndex": "11", "MontageElectrodeID": "11", "ElectrodeID": "11"},
+        {"Label": "LT2aA02", "Type": "sEEG", "NSxIndex": "", "MontageElectrodeID": "12", "ElectrodeID": "12"},
+    ]
+
+    reconcile_and_sort_output_rows(rows, logging.getLogger("test"))
+
+    assert [row["Label"] for row in rows] == ["RF30F01", "LT2aA01", "LT2aA02", "mRF30F01"]
+    assert rows[0]["ElectrodeID"] == "1"
+    assert rows[0]["MontageElectrodeID"] == "1"
+    assert rows[3]["ElectrodeID"] == "1-8"
+    assert rows[3]["MontageElectrodeID"] == "1-8"
+
+
+def test_reconcile_and_sort_output_rows_uses_montage_when_nsx_missing() -> None:
+    rows = [
+        {"Label": "LT2aA02", "Type": "sEEG", "NSxIndex": "", "MontageElectrodeID": "12", "ElectrodeID": "99"},
+        {"Label": "LT2aA01", "Type": "sEEG", "NSxIndex": "", "MontageElectrodeID": "11", "ElectrodeID": "98"},
+    ]
+
+    reconcile_and_sort_output_rows(rows, logging.getLogger("test"))
+
+    assert [row["Label"] for row in rows] == ["LT2aA01", "LT2aA02"]
+    assert rows[0]["ElectrodeID"] == "11"
+    assert rows[1]["ElectrodeID"] == "12"
 
 
 def test_build_electrodes_v2026_rave_layout_integration(tmp_path: Path) -> None:
@@ -275,6 +421,7 @@ def test_build_electrodes_v2026_rave_layout_integration(tmp_path: Path) -> None:
                 "MNI152_z": "0",
                 "LocationType": "iEEG",
                 "Hemisphere": "Left",
+                "Prototype": "ADTECH SEEG",
                 "MRVoxel_I": "100",
                 "MRVoxel_J": "100",
                 "MRVoxel_K": "100",
@@ -300,6 +447,7 @@ def test_build_electrodes_v2026_rave_layout_integration(tmp_path: Path) -> None:
                 "MNI152_z": "1",
                 "LocationType": "iEEG",
                 "Hemisphere": "Left",
+                "Prototype": "ADTECH SEEG",
                 "MRVoxel_I": "100",
                 "MRVoxel_J": "100",
                 "MRVoxel_K": "101",
@@ -358,13 +506,21 @@ def test_build_electrodes_v2026_rave_layout_integration(tmp_path: Path) -> None:
     assert len(rows) == 3
     assert rows[0]["Label"] == "LT2aA01"
     assert rows[0]["Type"] == "sEEG-micro"
+    assert rows[0]["RAVE_Label"] == "LT2AA1"
+    assert rows[0]["ProbeName"] == "LT2aA"
+    assert rows[0]["Radius"] == "1"
+    assert rows[0]["Manufacturer"] == "Ad-Tech"
     assert rows[0]["ROI_D2009_3mm"] == "Left-Hippocampus"
     assert rows[0]["Area_fs_vox"] == "ctx-lh-insula"
     assert rows[0]["Matter_fs_vox"] == "Grey"
     assert rows[2]["Label"] == "mLT2aA01"
     assert rows[2]["Type"] == "microwires"
-    assert rows[2]["ElectrodeID"] == "35"
-    assert rows[2]["MontageElectrodeID"] == "89-96"
+    assert rows[2]["ElectrodeID"] == "1-8"
+    assert rows[2]["MontageElectrodeID"] == "1-8"
+    assert rows[2]["RAVE_Label"] == "MLT2AA01"
+    assert rows[2]["ProbeName"] == "mLT2aA"
+    assert rows[2]["Radius"] == "0.5"
+    assert rows[2]["Manufacturer"] == "Ad-Tech"
     assert rows[0]["MontageElectrodeID"] == "33"
     assert rows[2]["NSxSource"] == "ns5"
     assert rows[2]["NSxIndex"] == "1-8"
