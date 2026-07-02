@@ -205,6 +205,30 @@ def split_label(label: str) -> tuple[str, int | None]:
     return stem, int(suffix)
 
 
+def bounded_edit_distance(left: str, right: str, max_distance: int = 3) -> int | None:
+    if left == right:
+        return 0
+    if abs(len(left) - len(right)) > max_distance:
+        return None
+    previous = list(range(len(right) + 1))
+    for i, left_char in enumerate(left, start=1):
+        current = [i]
+        row_min = i
+        for j, right_char in enumerate(right, start=1):
+            cost = 0 if left_char == right_char else 1
+            current.append(min(
+                previous[j] + 1,
+                current[j - 1] + 1,
+                previous[j - 1] + cost,
+            ))
+            row_min = min(row_min, current[-1])
+        if row_min > max_distance:
+            return None
+        previous = current
+    distance = previous[-1]
+    return distance if distance <= max_distance else None
+
+
 def strip_nsx_contact_suffix(label: str) -> str:
     return re.sub(r"[-_\s]+\d+$", "", str(label or "").strip())
 
@@ -742,6 +766,64 @@ def collect_shaft_rows(output_rows: list[dict[str, str]], owner_label: str) -> l
         row for row in output_rows
         if split_label(row["Label"])[0].casefold() == stem.casefold() and not row["Label"].startswith(("m", "M"))
     ]
+
+
+def resolve_micro_owner_row(
+    bundle: MicroBundle,
+    output_rows: list[dict[str, str]],
+    row_by_label: dict[str, dict[str, str]],
+    exact_claimed_owner_keys: set[str],
+    logger: logging.Logger,
+) -> dict[str, str] | None:
+    owner_key = canonicalize_label(bundle.owner_label)
+    owner_row = row_by_label.get(owner_key)
+    if owner_row is not None:
+        return owner_row
+
+    owner_suffix = split_label(bundle.owner_label)[1]
+    if owner_suffix is None:
+        return None
+
+    candidates: list[tuple[int, dict[str, str]]] = []
+    target = canonicalize_label(bundle.owner_label)
+    for row in output_rows:
+        if row.get("Type") == "microwires":
+            continue
+        candidate_label = row.get("Label", "")
+        candidate_key = canonicalize_label(candidate_label)
+        if candidate_key in exact_claimed_owner_keys:
+            continue
+        _, candidate_suffix = split_label(candidate_label)
+        if candidate_suffix != owner_suffix:
+            continue
+        distance = bounded_edit_distance(target, canonicalize_label(candidate_label), max_distance=3)
+        if distance is None or distance == 0:
+            continue
+        candidates.append((distance, row))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], canonicalize_label(item[1].get("Label", ""))))
+    best_distance, best_row = candidates[0]
+    tied = [row for distance, row in candidates if distance == best_distance]
+    if len(tied) > 1:
+        logger.warning(
+            "Ambiguous fuzzy macro owner match for micro bundle %s -> %s; candidates: %s",
+            bundle.representative_label,
+            bundle.owner_label,
+            [row.get("Label", "") for row in tied],
+        )
+        return None
+
+    logger.warning(
+        "Using fuzzy macro owner match for micro bundle %s: %s -> %s (edit distance %d)",
+        bundle.representative_label,
+        bundle.owner_label,
+        best_row.get("Label", ""),
+        best_distance,
+    )
+    return best_row
 
 
 def discover_subject_code(rows: list[dict[str, str]], input_csv: Path) -> str:
@@ -1394,10 +1476,14 @@ def build_electrodes_v2026(
 
     output_rows = [output_row_from_macro(montage_row, rave_row) for montage_row, rave_row in pairs]
     row_by_label = {canonicalize_label(row["Label"]): row for row in output_rows}
+    exact_claimed_owner_keys = {
+        canonicalize_label(bundle.owner_label)
+        for bundle in bundles
+        if canonicalize_label(bundle.owner_label) in row_by_label
+    }
 
     for bundle in bundles:
-        owner_key = canonicalize_label(bundle.owner_label)
-        owner_row = row_by_label.get(owner_key)
+        owner_row = resolve_micro_owner_row(bundle, output_rows, row_by_label, exact_claimed_owner_keys, logger)
         if owner_row is None:
             message = f"Micro bundle {bundle.representative_label} has no matching macro owner {bundle.owner_label}"
             if strict:

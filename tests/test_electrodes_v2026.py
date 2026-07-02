@@ -548,6 +548,97 @@ def test_build_electrodes_v2026_raises_for_missing_macro(tmp_path: Path) -> None
         raise AssertionError("Expected missing macro mismatch to raise ElectrodeBuildError")
 
 
+def test_build_electrodes_v2026_fuzzy_matches_micro_owner_typo(tmp_path: Path) -> None:
+    input_csv = tmp_path / "electrodes.csv"
+    montage = tmp_path / "montage.xlsx"
+    subject_root = tmp_path / "YFW"
+    subject_root.mkdir()
+
+    write_csv(
+        input_csv,
+        [
+            {"Electrode": "33", "Label": "LT2BHA1", "SubjectCode": "YFW", "Prototype": "ADTECH SEEG"},
+            {"Electrode": "34", "Label": "LT2BHA2", "SubjectCode": "YFW", "Prototype": "ADTECH SEEG"},
+        ],
+    )
+    write_simple_xlsx(
+        montage,
+        {
+            "Sheet1": [
+                ["TBarPinID", "ElectrodeID", "ChannelLabel"],
+                ["A01", "33", "LT2bHa01"],
+                ["A02", "34", "LT2bHa02"],
+            ],
+            "Sheet2": [
+                ["TBarPinID", "ElectrodeID", "ChannelLabel"],
+                ["A01", "89", "mLT2bHb01"],
+                ["A02", "90", "mLT2bHb02"],
+                ["A03", "91", "mLT2bHb03"],
+                ["A04", "92", "mLT2bHb04"],
+                ["A05", "93", "mLT2bHb05"],
+                ["A06", "94", "mLT2bHb06"],
+                ["A07", "95", "mLT2bHb07"],
+                ["A08", "96", "mLT2bHb08"],
+            ],
+        },
+    )
+
+    output = build_electrodes_v2026(input_csv=input_csv, montage=montage, subject_root=subject_root)
+    rows = read_csv(output)
+    micro = next(row for row in rows if row["Type"] == "microwires")
+    assert micro["Label"] == "mLT2bHb01"
+    assert micro["ProbeName"] == "mLT2bHb"
+
+
+def test_build_electrodes_v2026_fuzzy_match_does_not_steal_exact_owner(tmp_path: Path) -> None:
+    input_csv = tmp_path / "electrodes.csv"
+    montage = tmp_path / "montage.xlsx"
+    subject_root = tmp_path / "YFW"
+    subject_root.mkdir()
+
+    write_csv(
+        input_csv,
+        [
+            {"Electrode": "33", "Label": "LT2BHA1", "SubjectCode": "YFW", "Prototype": "ADTECH SEEG"},
+            {"Electrode": "34", "Label": "LT2BHA2", "SubjectCode": "YFW", "Prototype": "ADTECH SEEG"},
+        ],
+    )
+    write_simple_xlsx(
+        montage,
+        {
+            "Sheet1": [
+                ["TBarPinID", "ElectrodeID", "ChannelLabel"],
+                ["A01", "33", "LT2bHa01"],
+                ["A02", "34", "LT2bHa02"],
+            ],
+            "Sheet2": [
+                ["TBarPinID", "ElectrodeID", "ChannelLabel"],
+                ["A01", "89", "mLT2bHa01"],
+                ["A02", "90", "mLT2bHa02"],
+                ["A03", "91", "mLT2bHa03"],
+                ["A04", "92", "mLT2bHa04"],
+                ["A05", "93", "mLT2bHa05"],
+                ["A06", "94", "mLT2bHa06"],
+                ["A07", "95", "mLT2bHa07"],
+                ["A08", "96", "mLT2bHa08"],
+                ["B01", "97", "mLT2bHb01"],
+                ["B02", "98", "mLT2bHb02"],
+                ["B03", "99", "mLT2bHb03"],
+                ["B04", "100", "mLT2bHb04"],
+                ["B05", "101", "mLT2bHb05"],
+                ["B06", "102", "mLT2bHb06"],
+                ["B07", "103", "mLT2bHb07"],
+                ["B08", "104", "mLT2bHb08"],
+            ],
+        },
+    )
+
+    output = build_electrodes_v2026(input_csv=input_csv, montage=montage, subject_root=subject_root)
+    rows = read_csv(output)
+    micro_labels = [row["Label"] for row in rows if row["Type"] == "microwires"]
+    assert micro_labels == ["mLT2bHa01"]
+
+
 def test_xtract_helper_script_exists() -> None:
     path = Path("scripts/run_xtract_rave_subject.sh")
     assert path.exists()
